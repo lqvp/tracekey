@@ -1,0 +1,7 @@
+misskey_url = "https://misskey.io"
+misskey_token = "YOUR_MISSKEY_API_TOKEN"
+misskey_visibility = "home"
+target_urls = ["https://misskey.io", "https://misskey.vip"]
+check_interval_seconds = 300
+user_agent = "Tracekey/1.0"
+request_timeout_seconds = 10
