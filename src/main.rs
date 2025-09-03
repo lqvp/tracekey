@@ -94,6 +94,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let settings = load_settings()?;
 
+    if settings.reporting.enabled && settings.output_format == "none" {
+        anyhow::bail!(
+            "Reporting is enabled, but output_format is set to 'none'. Please use 'json' or 'csv'."
+        );
+    }
+
     if cli.report {
         run_report_once(&settings, &cli).await?;
         return Ok(());
@@ -178,21 +184,25 @@ async fn main() -> Result<()> {
 }
 
 async fn run_report_once(settings: &Settings, cli: &Cli) -> Result<()> {
-    let results = match load_check_results(&settings.output_path, &settings.output_format) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Could not load check results: {}. No report will be generated.", e);
-            return Ok(());
-        }
-    };
-
     let until = cli.until.unwrap_or_else(Utc::now);
-    let since = cli.since.unwrap_or_else(|| until - ChronoDuration::from_std(parse_duration(&settings.reporting.interval).unwrap()).unwrap());
+    let since = cli.since.unwrap_or_else(|| {
+        until
+            - ChronoDuration::from_std(parse_duration(&settings.reporting.interval).unwrap())
+                .unwrap()
+    });
 
-    let filtered_results: Vec<_> = results
-        .into_iter()
-        .filter(|r| r.timestamp >= since && r.timestamp <= until)
-        .collect();
+    let filtered_results =
+        match load_check_results(&settings.output_path, &settings.output_format, Some(since), Some(until)) {
+            Ok(r) => r,
+            Err(e) => {
+                if e.downcast_ref::<std::io::Error>()
+                    .map_or(true, |io_err| io_err.kind() != std::io::ErrorKind::NotFound)
+                {
+                    eprintln!("Could not load check results: {}. No report will be generated.", e);
+                }
+                return Ok(());
+            }
+        };
 
     if filtered_results.is_empty() {
         println!("No data found for the specified period. No report will be generated.");
@@ -243,12 +253,20 @@ fn generate_report(results: &[CheckResult], targets: &[String]) -> Report {
         let uptime = (successful_checks as f64 / total_checks as f64) * 100.0;
 
         let rtts: Vec<f64> = target_results.iter().map(|r| r.rtt_millis as f64).collect();
+        let mut sorted_rtts = rtts.clone();
+        sorted_rtts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let p95_index = (sorted_rtts.len() as f64 * 0.95) as usize;
+        let p95 = if p95_index < sorted_rtts.len() {
+            sorted_rtts[p95_index]
+        } else {
+            *sorted_rtts.last().unwrap_or(&0.0)
+        };
         let rtt_stats = RttStats {
             min: target_results.iter().map(|r| r.rtt_millis).min().unwrap_or(0),
             max: target_results.iter().map(|r| r.rtt_millis).max().unwrap_or(0),
             mean: mean(&rtts),
             median: median(&rtts),
-            p95: median(&rtts), // Using median as a temporary substitute for percentile
+            p95,
         };
 
         let mut unique_colos = HashMap::new();
@@ -296,25 +314,21 @@ fn format_report_mfm(report: &Report) -> String {
     ));
 
     for stats in &report.target_stats {
-        mfm.push_str(&format!(
-            "<details><summary>{}</summary>\n\n",
-            stats.url
-        ));
+        mfm.push_str(&format!("**?[{}]({})**\n", stats.url, stats.url));
         mfm.push_str(&format!(
             "- **稼働率:** {:.3}% ({} / {} 成功)\n",
             stats.uptime, stats.successful_checks, stats.total_checks
         ));
         mfm.push_str(&format!(
-            "- **RTT:** Min: {}ms, Max: {}ms, Avg: {:.2}ms, Median: {:.2}ms, 95th: {:.2}ms\n",
+            "- **RTT:** Min: {}ms, Max: {}ms, Avg: {:.2}ms, Median: {:.2}ms, P95: {:.2}ms\n",
             stats.rtt_stats.min, stats.rtt_stats.max, stats.rtt_stats.mean, stats.rtt_stats.median, stats.rtt_stats.p95
         ));
         mfm.push_str(&format!(
-            "- **Colo:** {}回変更, 最頻出: {}, ユニーク: {}\n",
+            "- **Colo:** {}回変更, 最頻出: {}, ユニーク: {}\n\n",
             stats.colo_changes,
             stats.most_frequent_colo,
             stats.unique_colos.join(", ")
         ));
-        mfm.push_str("</details>\n");
     }
 
     mfm
@@ -346,7 +360,8 @@ fn format_report_console(report: &Report, settings: &ReportingSettings) {
 
         println!("URL: {}", stats.url.bold());
         println!("  稼働率: {}", uptime_colored);
-        println!("  RTT (Avg): {}", rtt_avg_colored);
+        println!("  RTT - Min: {}ms, Max: {}ms, Avg: {}, Median: {:.2}ms, P95: {:.2}ms",
+                 stats.rtt_stats.min, stats.rtt_stats.max, rtt_avg_colored, stats.rtt_stats.median, stats.rtt_stats.p95);
         println!("  Colo Changes: {}", stats.colo_changes);
         println!("  Most Frequent Colo: {}", stats.most_frequent_colo);
     }
@@ -372,7 +387,7 @@ async fn get_cloudflare_trace(client: &Client, url: &str) -> Result<CheckResult>
         }
     }
 
-    let colo = trace_data.get("colo").cloned().unwrap_or_else(|| "N/A".to_string());
+    let colo = trace_data.remove("colo").unwrap_or_else(|| "N/A".to_string());
 
     Ok(CheckResult {
         timestamp: Utc::now(),
@@ -455,7 +470,12 @@ fn write_results(path: &str, format: &str, results: &[CheckResult]) -> Result<()
     Ok(())
 }
 
-fn load_check_results(path: &str, format: &str) -> Result<Vec<CheckResult>> {
+fn load_check_results(
+    path: &str,
+    format: &str,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+) -> Result<Vec<CheckResult>> {
     let file = StdFile::open(path)?;
     let reader = BufReader::new(file);
     let mut results = Vec::new();
@@ -467,13 +487,25 @@ fn load_check_results(path: &str, format: &str) -> Result<Vec<CheckResult>> {
                 if line.trim().is_empty() {
                     continue;
                 }
-                results.push(serde_json::from_str(&line)?);
+                let result: CheckResult = serde_json::from_str(&line)?;
+                let in_since = since.map_or(true, |s| result.timestamp >= s);
+                let in_until = until.map_or(true, |u| result.timestamp <= u);
+
+                if in_since && in_until {
+                    results.push(result);
+                }
             }
         }
         "csv" => {
             let mut rdr = csv::Reader::from_reader(reader);
-            for result in rdr.deserialize() {
-                results.push(result?);
+            for result in rdr.deserialize::<CheckResult>() {
+                let result = result?;
+                let in_since = since.map_or(true, |s| result.timestamp >= s);
+                let in_until = until.map_or(true, |u| result.timestamp <= u);
+
+                if in_since && in_until {
+                    results.push(result);
+                }
             }
         }
         _ => {}

@@ -16,19 +16,34 @@
   - Displays color-coded reports in the console.
   - Can be triggered periodically or on-demand via CLI.
 
+## Installation
+
+1. Ensure Rust is installed. If not, install it using [rustup](https://rustup.rs/).
+2. Clone the repository:
+
+   ```sh
+   git clone <repository-url>
+   cd tracekey
+   ```
+
+3. Build the dependencies:
+
+   ```sh
+   cargo build --release
+   ```
+
 ## Usage
 
-### Monitoring Mode
+### Monitoring Mode (Default)
 
-This is the default mode. The application will continuously monitor the specified URLs.
+This mode continuously monitors the specified URLs.
 
-1. Clone the repository.
-2. Configure your `config/default.toml` file (see `config/default.toml` for all options).
-3. Build and run the application:
+1. Configure your `config/default.toml` file (see Configuration section for details).
+2. Build and run the application:
 
-    ```sh
-    cargo run --release
-    ```
+   ```sh
+   cargo run --release
+   ```
 
 ### Reporting Mode
 
@@ -46,10 +61,42 @@ cargo run --release -- --report
 
 ## Configuration
 
-All settings are managed in the `config/default.toml` file. This includes:
+All settings are managed in the `config/default.toml` file. Here are the main configuration options:
 
-- Misskey integration settings (API token, URL).
-- Target URLs to monitor.
-- Monitoring intervals and timeouts.
-- Output format (`json`, `csv`, or `none`) and file path.
-- **Reporting settings:** enable/disable, interval, output targets, and console color thresholds.
+### Misskey Integration (Optional)
+
+- `misskey_url`: URL of the Misskey instance (e.g., "<https://misskey.io>")
+- `misskey_token`: Misskey API token (leave empty to disable)
+- `misskey_visibility`: Post visibility ("public", "home", "followers")
+
+### Targets
+
+- `target_urls`: List of URLs to monitor (e.g., ["https://misskey.io", "https://misskey.vip"])
+
+### Monitoring Settings
+
+- `check_interval_seconds`: Check interval in seconds
+- `user_agent`: User-agent for requests
+- `request_timeout_seconds`: Request timeout in seconds
+
+### Output Settings
+
+- `output_format`: Output format ("json", "csv", "none")
+- `output_path`: Path to the output file
+
+### Reporting Settings
+
+- `reporting.enabled`: Enable reporting functionality
+- `reporting.interval`: Reporting interval (e.g., "24h")
+- `reporting.output_to_console`: Output to console
+- `reporting.output_to_misskey`: Post to Misskey
+- `reporting.rtt_threshold_ms`: RTT threshold for console highlighting
+- `reporting.uptime_threshold_percent`: Uptime threshold for console highlighting
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+## Contributing
+
+Please report bugs or request features via GitHub Issues. Pull requests are welcome!
