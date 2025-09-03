@@ -3,7 +3,9 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use clap::Parser;
 use colored::*;
 use config::{Config, File};
+use futures::stream::StreamExt;
 use humantime::parse_duration;
+use rand::Rng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use statistical::{mean, median};
@@ -11,7 +13,8 @@ use std::collections::HashMap;
 use std::fs::{File as StdFile, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::time::Duration;
-use tokio::time;
+use tokio::time::{self, MissedTickBehavior};
+use url::Url;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -41,30 +44,37 @@ struct ReportingSettings {
 struct Settings {
     misskey_url: String,
     misskey_token: Option<String>,
-    misskey_visibility: String,
     target_urls: Vec<String>,
     check_interval_seconds: u64,
     user_agent: String,
     request_timeout_seconds: u64,
     output_format: String,
     output_path: String,
+    max_concurrent_checks: usize,
     reporting: ReportingSettings,
 }
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct CheckResult {
     timestamp: DateTime<Utc>,
     url: String,
-    colo: String,
-    rtt_millis: u128,
-    #[serde(flatten)]
-    trace_data: HashMap<String, String>,
+    success: bool,
+    rtt_millis: Option<u64>,
+    error: Option<String>,
+    colo: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TraceData {
+    timestamp: DateTime<Utc>,
+    url: String,
+    rtt_millis: u64,
+    colo: Option<String>,
 }
 
 #[derive(Debug)]
 struct RttStats {
-    min: u128,
-    max: u128,
+    min: u64,
+    max: u64,
     mean: f64,
     median: f64,
     p95: f64,
@@ -77,14 +87,12 @@ struct TargetStats {
     successful_checks: usize,
     uptime: f64,
     rtt_stats: RttStats,
-    unique_colos: Vec<String>,
-    colo_changes: usize,
-    most_frequent_colo: String,
 }
 
 #[derive(Debug)]
 struct Report {
-    total_targets: usize,
+    configured_targets: usize,
+    reported_targets: usize,
     overall_uptime: f64,
     target_stats: Vec<TargetStats>,
 }
@@ -94,9 +102,14 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let settings = load_settings()?;
 
+    // URL バリデーション
+    for url in &settings.target_urls {
+        Url::parse(url).map_err(|e| anyhow::anyhow!("Invalid URL {}: {}", url, e))?;
+    }
+
     if settings.reporting.enabled && settings.output_format == "none" {
         anyhow::bail!(
-            "Reporting is enabled, but output_format is set to 'none'. Please use 'json' or 'csv'."
+            "Reporting is enabled, but output_format is set to 'none'. Please use 'json'."
         );
     }
 
@@ -105,70 +118,39 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut last_colos: HashMap<String, String> = HashMap::new();
     let client = Client::builder()
         .user_agent(&settings.user_agent)
         .timeout(Duration::from_secs(settings.request_timeout_seconds))
         .build()?;
 
-    println!("Starting tracekey monitoring with User-Agent: {}", settings.user_agent);
+    println!(
+        "Starting tracekey monitoring with User-Agent: {}",
+        settings.user_agent
+    );
 
     let check_interval_duration = Duration::from_secs(settings.check_interval_seconds);
+    if check_interval_duration.is_zero() {
+        anyhow::bail!("Check interval cannot be 0");
+    }
     let mut check_interval = time::interval(check_interval_duration);
+    check_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let report_interval_duration = parse_duration(&settings.reporting.interval)?;
+    if report_interval_duration.is_zero() {
+        anyhow::bail!("Reporting interval cannot be 0");
+    }
     let mut report_interval = time::interval(report_interval_duration);
+
+    // Run initial check immediately
+    if let Err(e) = run_checks_once(&settings, &client, false).await {
+        eprintln!("Initial check failed: {}", e);
+    }
 
     loop {
         tokio::select! {
             _ = check_interval.tick() => {
-                println!("Running check...");
-                let mut results: Vec<CheckResult> = Vec::new();
-                let mut changes: Vec<String> = Vec::new();
-
-                for url in &settings.target_urls {
-                    println!("Checking trace for {}", url);
-                    match get_cloudflare_trace(&client, url).await {
-                        Ok(result) => {
-                            println!(
-                                "Result for {}: colo={}, rtt={}ms",
-                                result.url, result.colo, result.rtt_millis
-                            );
-                            let last_colo = last_colos.entry(result.url.clone()).or_insert_with(|| result.colo.clone());
-                            if !last_colo.is_empty() && last_colo != &result.colo {
-                                let message = format!(
-                                    "Cloudflare colocation for {} changed: `{}` -> `{}` (RTT: {}ms)",
-                                    result.url, last_colo, result.colo, result.rtt_millis
-                                );
-                                println!("CHANGE DETECTED: {}", message);
-                                changes.push(message);
-                            }
-                            *last_colo = result.colo.clone();
-                            results.push(result);
-                        }
-                        Err(e) => eprintln!("Failed to get trace for {}: {}", url, e),
-                    }
-                }
-
-                if !results.is_empty() {
-                    if let Err(e) = write_results(&settings.output_path, &settings.output_format, &results) {
-                        eprintln!("Failed to write results: {}", e);
-                    }
-                }
-
-                if !changes.is_empty() {
-                    if let Some(token) = &settings.misskey_token {
-                        if !token.is_empty() {
-                            let final_message = changes.join("\n");
-                            println!("Posting to Misskey:\n{}", final_message);
-                            if let Err(e) =
-                                post_to_misskey(&client, &settings.misskey_url, token, &final_message, &settings.misskey_visibility)
-                                    .await
-                            {
-                                eprintln!("Failed to post to Misskey: {}", e);
-                            }
-                        }
-                    }
+                if let Err(e) = run_checks_once(&settings, &client, false).await {
+                    eprintln!("Scheduled check failed: {}", e);
                 }
             },
             _ = report_interval.tick() => {
@@ -178,31 +160,166 @@ async fn main() -> Result<()> {
                         eprintln!("Failed to generate periodic report: {}", e);
                     }
                 }
+            },
+            _ = tokio::signal::ctrl_c() => {
+                println!("\nCtrl+C received, shutting down.");
+                break;
             }
         }
     }
+
+    println!("Tracekey monitoring stopped.");
+    Ok(())
+}
+
+async fn run_checks_once(settings: &Settings, client: &Client, dry_run: bool) -> Result<()> {
+    println!("Running check...");
+
+    let prev_map: HashMap<String, Option<String>> = load_check_results(
+        settings.output_path.clone(),
+        settings.output_format.clone(),
+        None,
+        None,
+    )
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .filter(|r| r.success)
+    .fold(HashMap::new(), |mut m, r| {
+        m.insert(r.url.clone(), r.colo.clone());
+        m
+    });
+
+    let tasks = settings.target_urls.iter().map(|url| {
+        let client = client.clone();
+        let url = url.clone();
+        async move { (url.clone(), check_site_status(&client, &url).await) }
+    });
+    let outcomes = futures::stream::iter(tasks)
+        .buffer_unordered(settings.max_concurrent_checks)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut results: Vec<CheckResult> = Vec::new();
+    for (url, outcome) in outcomes {
+        let check_result = match outcome {
+            Ok(trace_data) => {
+                println!(
+                    "Result for {}: rtt={}ms",
+                    trace_data.url, trace_data.rtt_millis
+                );
+                CheckResult {
+                    timestamp: trace_data.timestamp,
+                    url: trace_data.url,
+                    success: true,
+                    rtt_millis: Some(trace_data.rtt_millis),
+                    error: None,
+                    colo: trace_data.colo.clone(),
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to get trace for {}: {}", url, e);
+                CheckResult {
+                    timestamp: Utc::now(),
+                    url,
+                    success: false,
+                    rtt_millis: None,
+                    error: Some(e.to_string()),
+                    colo: None,
+                }
+            }
+        };
+        results.push(check_result);
+    }
+    if !dry_run {
+        for result in &results {
+            if result.success {
+                if let (Some(curr), Some(prev)) = (
+                    result.colo.as_ref(),
+                    prev_map.get(&result.url).and_then(|o| o.as_ref()),
+                ) {
+                    if curr != prev {
+                        let message = format!(
+                            "Cloudflare colocation for ?[{}]({}) changed: `{}` -> `{}` (RTT: {}ms)",
+                            result.url,
+                            result.url,
+                            prev,
+                            curr,
+                            result.rtt_millis.unwrap_or(0)
+                        );
+                        if settings.reporting.output_to_misskey {
+                            if let Some(token) = &settings.misskey_token {
+                                if !token.is_empty() {
+                                    let client = Client::new();
+                                    println!("Posting colo change to Misskey...");
+                                    post_to_misskey(
+                                        &client,
+                                        &settings.misskey_url,
+                                        token,
+                                        &message,
+                                        &settings.reporting.misskey_visibility,
+                                    )
+                                    .await?;
+                                    println!("Colo change posted to Misskey successfully.");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !results.is_empty() {
+        if let Err(e) = write_results(
+            settings.output_path.clone(),
+            settings.output_format.clone(),
+            results.clone(),
+        )
+        .await
+        {
+            eprintln!("Failed to write results: {}", e);
+        }
+    }
+
+    Ok(())
 }
 
 async fn run_report_once(settings: &Settings, cli: &Cli) -> Result<()> {
     let until = cli.until.unwrap_or_else(Utc::now);
-    let since = cli.since.unwrap_or_else(|| {
-        until
-            - ChronoDuration::from_std(parse_duration(&settings.reporting.interval).unwrap())
-                .unwrap()
-    });
+    let since = if let Some(s) = cli.since {
+        s
+    } else {
+        let duration_std = parse_duration(&settings.reporting.interval)
+            .map_err(|e| anyhow::anyhow!("Failed to parse reporting interval setting: {}", e))?;
 
-    let filtered_results =
-        match load_check_results(&settings.output_path, &settings.output_format, Some(since), Some(until)) {
-            Ok(r) => r,
-            Err(e) => {
-                if e.downcast_ref::<std::io::Error>()
-                    .map_or(true, |io_err| io_err.kind() != std::io::ErrorKind::NotFound)
-                {
-                    eprintln!("Could not load check results: {}. No report will be generated.", e);
-                }
-                return Ok(());
+        let duration_chrono = ChronoDuration::from_std(duration_std)
+            .map_err(|_| anyhow::anyhow!("Reporting interval setting is invalid or too large"))?;
+
+        until - duration_chrono
+    };
+
+    let filtered_results = match load_check_results(
+        settings.output_path.clone(),
+        settings.output_format.clone(),
+        Some(since),
+        Some(until),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            if e.downcast_ref::<std::io::Error>()
+                .map_or(true, |io_err| io_err.kind() != std::io::ErrorKind::NotFound)
+            {
+                eprintln!(
+                    "Could not load check results: {}. No report will be generated.",
+                    e
+                );
             }
-        };
+            return Ok(());
+        }
+    };
 
     if filtered_results.is_empty() {
         println!("No data found for the specified period. No report will be generated.");
@@ -239,47 +356,81 @@ async fn run_report_once(settings: &Settings, cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    if sorted.len() == 1 {
+        return sorted[0];
+    }
+    let p = p.clamp(0.0, 1.0);
+    let n = sorted.len();
+    let rank = p * (n as f64 - 1.0);
+    let lo = rank.floor() as usize;
+    let hi = rank.ceil() as usize;
+    if lo == hi {
+        sorted[lo]
+    } else {
+        let w = rank - lo as f64;
+        sorted[lo] * (1.0 - w) + sorted[hi] * w
+    }
+}
+
 fn generate_report(results: &[CheckResult], targets: &[String]) -> Report {
     let mut target_stats = Vec::new();
 
     for target in targets {
-        let target_results: Vec<_> = results.iter().filter(|r| &r.url == target).cloned().collect();
+        let target_results: Vec<_> = results
+            .iter()
+            .filter(|r| &r.url == target)
+            .cloned()
+            .collect();
         if target_results.is_empty() {
             continue;
         }
 
         let total_checks = target_results.len();
-        let successful_checks = total_checks; // Assuming all logged checks are successful for now
-        let uptime = (successful_checks as f64 / total_checks as f64) * 100.0;
-
-        let rtts: Vec<f64> = target_results.iter().map(|r| r.rtt_millis as f64).collect();
-        let mut sorted_rtts = rtts.clone();
-        sorted_rtts.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let p95_index = (sorted_rtts.len() as f64 * 0.95) as usize;
-        let p95 = if p95_index < sorted_rtts.len() {
-            sorted_rtts[p95_index]
+        let successful_checks = target_results.iter().filter(|r| r.success).count();
+        let uptime = if total_checks > 0 {
+            (successful_checks as f64 / total_checks as f64) * 100.0
         } else {
-            *sorted_rtts.last().unwrap_or(&0.0)
-        };
-        let rtt_stats = RttStats {
-            min: target_results.iter().map(|r| r.rtt_millis).min().unwrap_or(0),
-            max: target_results.iter().map(|r| r.rtt_millis).max().unwrap_or(0),
-            mean: mean(&rtts),
-            median: median(&rtts),
-            p95,
+            0.0
         };
 
-        let mut unique_colos = HashMap::new();
-        let mut colo_changes = 0;
-        let mut last_colo = "";
-        for r in &target_results {
-            *unique_colos.entry(r.colo.clone()).or_insert(0) += 1;
-            if !last_colo.is_empty() && last_colo != r.colo {
-                colo_changes += 1;
+        let rtts: Vec<f64> = target_results
+            .iter()
+            .filter_map(|r| r.rtt_millis.map(|rtt| rtt as f64))
+            .collect();
+
+        let rtt_stats = if !rtts.is_empty() {
+            let mut sorted_rtts = rtts.clone();
+            sorted_rtts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let p95 = percentile(&sorted_rtts, 0.95);
+
+            RttStats {
+                min: target_results
+                    .iter()
+                    .filter_map(|r| r.rtt_millis)
+                    .min()
+                    .unwrap_or(0),
+                max: target_results
+                    .iter()
+                    .filter_map(|r| r.rtt_millis)
+                    .max()
+                    .unwrap_or(0),
+                mean: mean(&rtts),
+                median: median(&rtts),
+                p95,
             }
-            last_colo = &r.colo;
-        }
-        let most_frequent_colo = unique_colos.iter().max_by_key(|(_, count)| *count).map(|(colo, _)| colo.clone()).unwrap_or_default();
+        } else {
+            RttStats {
+                min: 0,
+                max: 0,
+                mean: 0.0,
+                median: 0.0,
+                p95: 0.0,
+            }
+        };
 
         target_stats.push(TargetStats {
             url: target.clone(),
@@ -287,20 +438,23 @@ fn generate_report(results: &[CheckResult], targets: &[String]) -> Report {
             successful_checks,
             uptime,
             rtt_stats,
-            unique_colos: unique_colos.keys().cloned().collect(),
-            colo_changes,
-            most_frequent_colo,
         });
     }
 
-    let overall_uptime = if !target_stats.is_empty() {
-        target_stats.iter().map(|s| s.uptime).sum::<f64>() / target_stats.len() as f64
+    let (succ, total): (usize, usize) = target_stats
+        .iter()
+        .map(|s| (s.successful_checks, s.total_checks))
+        .fold((0, 0), |(a, b), (x, y)| (a + x, b + y));
+
+    let overall_uptime = if total > 0 {
+        (succ as f64 / total as f64) * 100.0
     } else {
         0.0
     };
 
     Report {
-        total_targets: targets.len(),
+        configured_targets: targets.len(),
+        reported_targets: target_stats.len(),
         overall_uptime,
         target_stats,
     }
@@ -309,8 +463,8 @@ fn generate_report(results: &[CheckResult], targets: &[String]) -> Report {
 fn format_report_mfm(report: &Report) -> String {
     let mut mfm = String::new();
     mfm.push_str(&format!(
-        "**📊 監視レポート**\n\n**総合サマリー**\n- **監視対象:** {} サイト\n- **全体の平均稼働率:** {:.3}%\n\n",
-        report.total_targets, report.overall_uptime
+        "**📊 監視レポート**\n\n**総合サマリー**\n- **監視対象:** {} / {} サイト\n- **全体の平均稼働率:** {:.3}%\n\n",
+        report.reported_targets, report.configured_targets, report.overall_uptime
     ));
 
     for stats in &report.target_stats {
@@ -320,14 +474,12 @@ fn format_report_mfm(report: &Report) -> String {
             stats.uptime, stats.successful_checks, stats.total_checks
         ));
         mfm.push_str(&format!(
-            "- **RTT:** Min: {}ms, Max: {}ms, Avg: {:.2}ms, Median: {:.2}ms, P95: {:.2}ms\n",
-            stats.rtt_stats.min, stats.rtt_stats.max, stats.rtt_stats.mean, stats.rtt_stats.median, stats.rtt_stats.p95
-        ));
-        mfm.push_str(&format!(
-            "- **Colo:** {}回変更, 最頻出: {}, ユニーク: {}\n\n",
-            stats.colo_changes,
-            stats.most_frequent_colo,
-            stats.unique_colos.join(", ")
+            "- **RTT:** Min: {}ms, Max: {}ms, Avg: {:.2}ms, Median: {:.2}ms, P95: {:.2}ms\n\n",
+            stats.rtt_stats.min,
+            stats.rtt_stats.max,
+            stats.rtt_stats.mean,
+            stats.rtt_stats.median,
+            stats.rtt_stats.p95
         ));
     }
 
@@ -338,8 +490,8 @@ fn format_report_console(report: &Report, settings: &ReportingSettings) {
     println!("📊 監視レポート");
     println!("-----------------");
     println!(
-        "総合サマリー: {} サイト, 平均稼働率: {:.3}%",
-        report.total_targets, report.overall_uptime
+        "総合サマリー: {} / {} サイト, 平均稼働率: {:.3}%",
+        report.reported_targets, report.configured_targets, report.overall_uptime
     );
     println!("-----------------");
 
@@ -360,45 +512,58 @@ fn format_report_console(report: &Report, settings: &ReportingSettings) {
 
         println!("URL: {}", stats.url.bold());
         println!("  稼働率: {}", uptime_colored);
-        println!("  RTT - Min: {}ms, Max: {}ms, Avg: {}, Median: {:.2}ms, P95: {:.2}ms",
-                 stats.rtt_stats.min, stats.rtt_stats.max, rtt_avg_colored, stats.rtt_stats.median, stats.rtt_stats.p95);
-        println!("  Colo Changes: {}", stats.colo_changes);
-        println!("  Most Frequent Colo: {}", stats.most_frequent_colo);
+        println!(
+            "  RTT - Min: {}ms, Max: {}ms, Avg: {}, Median: {:.2}ms, P95: {:.2}ms",
+            stats.rtt_stats.min,
+            stats.rtt_stats.max,
+            rtt_avg_colored,
+            stats.rtt_stats.median,
+            stats.rtt_stats.p95
+        );
     }
 }
 
 fn load_settings() -> Result<Settings> {
     let settings = Config::builder()
-        .add_source(File::with_name("config/default"))
+        .add_source(File::with_name("config/default.toml").required(false))
+        .add_source(config::Environment::with_prefix("APP").separator("_"))
         .build()?;
     Ok(settings.try_deserialize()?)
 }
 
-async fn get_cloudflare_trace(client: &Client, url: &str) -> Result<CheckResult> {
-    let trace_url = format!("{}/cdn-cgi/trace", url);
+async fn check_site_status(client: &Client, url: &str) -> Result<TraceData> {
+    let mut nodeinfo_url = Url::parse(url)?;
+    nodeinfo_url.set_path("/.well-known/nodeinfo");
+
     let start_time = time::Instant::now();
-    let resp = client.get(&trace_url).send().await?.text().await?;
+    let resp = client.get(nodeinfo_url).send().await?;
     let rtt = start_time.elapsed();
 
-    let mut trace_data = HashMap::new();
-    for line in resp.lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            trace_data.insert(key.to_string(), value.to_string());
-        }
+    if resp.status() != 200 {
+        anyhow::bail!("Request failed with status: {}", resp.status());
     }
 
-    let colo = trace_data.remove("colo").unwrap_or_else(|| "N/A".to_string());
+    let colo = resp
+        .headers()
+        .get("cf-ray")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.split('-').last().map(|s| s.to_string()));
 
-    Ok(CheckResult {
+    Ok(TraceData {
         timestamp: Utc::now(),
         url: url.to_string(),
+        rtt_millis: std::cmp::min(rtt.as_millis(), u64::MAX as u128) as u64,
         colo,
-        rtt_millis: rtt.as_millis(),
-        trace_data,
     })
 }
 
-async fn post_to_misskey(client: &Client, url: &str, token: &str, text: &str, visibility: &str) -> Result<()> {
+async fn post_to_misskey(
+    client: &Client,
+    url: &str,
+    token: &str,
+    text: &str,
+    visibility: &str,
+) -> Result<()> {
     let api_url = format!("{}/api/notes/create", url);
     let mut params = HashMap::new();
     params.insert("i", token.to_string());
@@ -429,86 +594,83 @@ async fn post_to_misskey(client: &Client, url: &str, token: &str, text: &str, vi
         }
 
         if attempts >= max_attempts {
-            return Err(anyhow::anyhow!("Failed to post to Misskey after {} attempts", max_attempts));
+            return Err(anyhow::anyhow!(
+                "Failed to post to Misskey after {} attempts",
+                max_attempts
+            ));
         }
 
         time::sleep(delay).await;
-        delay *= 2;
+        delay = delay * 2 + Duration::from_millis(rand::rng().random_range(0..1000));
     }
 }
 
-fn write_results(path: &str, format: &str, results: &[CheckResult]) -> Result<()> {
+async fn write_results(path: String, format: String, results: Vec<CheckResult>) -> Result<()> {
     if format == "none" {
         return Ok(());
     }
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
 
-    match format {
-        "json" => {
-            for result in results {
-                let json_string = serde_json::to_string(result)?;
-                writeln!(file, "{}", json_string)?;
+        match format.as_str() {
+            "json" => {
+                let mut file = std::io::BufWriter::new(file);
+                for result in &results {
+                    let json_string = serde_json::to_string(result)?;
+                    writeln!(file, "{}", json_string)?;
+                }
             }
+            other => anyhow::bail!("unsupported output_format: {}", other),
         }
-        "csv" => {
-            // Check if the file is new to write headers
-            let is_new_file = file.metadata()?.len() == 0;
-            let mut wtr = csv::WriterBuilder::new()
-                .has_headers(is_new_file)
-                .from_writer(file);
-            for result in results {
-                wtr.serialize(result)?;
-            }
-            wtr.flush()?;
-        }
-        _ => {}
-    }
+        Ok(())
+    })
+    .await??;
     Ok(())
 }
 
-fn load_check_results(
-    path: &str,
-    format: &str,
+async fn load_check_results(
+    path: String,
+    format: String,
     since: Option<DateTime<Utc>>,
     until: Option<DateTime<Utc>>,
 ) -> Result<Vec<CheckResult>> {
-    let file = StdFile::open(path)?;
-    let reader = BufReader::new(file);
-    let mut results = Vec::new();
+    let results = tokio::task::spawn_blocking(move || -> Result<Vec<CheckResult>> {
+        // ファイルがない場合は空
+        let file = match StdFile::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let reader = BufReader::new(file);
+        let mut results = Vec::new();
 
-    match format {
-        "json" => {
-            for line in reader.lines() {
-                let line = line?;
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let result: CheckResult = serde_json::from_str(&line)?;
-                let in_since = since.map_or(true, |s| result.timestamp >= s);
-                let in_until = until.map_or(true, |u| result.timestamp <= u);
-
-                if in_since && in_until {
-                    results.push(result);
+        match format.as_str() {
+            "json" => {
+                for (lineno, line) in reader.lines().enumerate() {
+                    let line = line?;
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    match serde_json::from_str::<CheckResult>(&line) {
+                        Ok(result) => {
+                            let in_since = since.map_or(true, |s| result.timestamp >= s);
+                            let in_until = until.map_or(true, |u| result.timestamp <= u);
+                            if in_since && in_until {
+                                results.push(result);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Skip malformed line {}: {}", lineno + 1, e);
+                        }
+                    }
                 }
             }
+            other => anyhow::bail!("unsupported output_format: {}", other),
         }
-        "csv" => {
-            let mut rdr = csv::Reader::from_reader(reader);
-            for result in rdr.deserialize::<CheckResult>() {
-                let result = result?;
-                let in_since = since.map_or(true, |s| result.timestamp >= s);
-                let in_until = until.map_or(true, |u| result.timestamp <= u);
+        Ok(results)
+    })
+    .await??;
 
-                if in_since && in_until {
-                    results.push(result);
-                }
-            }
-        }
-        _ => {}
-    }
     Ok(results)
 }
