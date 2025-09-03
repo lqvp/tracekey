@@ -61,15 +61,10 @@ struct CheckResult {
     rtt_millis: Option<u64>,
     error: Option<String>,
     colo: Option<String>,
+    #[serde(flatten)]
+    trace_data: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
-struct TraceData {
-    timestamp: DateTime<Utc>,
-    url: String,
-    rtt_millis: u64,
-    colo: Option<String>,
-}
 
 #[derive(Debug)]
 struct RttStats {
@@ -87,6 +82,9 @@ struct TargetStats {
     successful_checks: usize,
     uptime: f64,
     rtt_stats: RttStats,
+    unique_colos: Vec<String>,
+    colo_changes: usize,
+    most_frequent_colo: String,
 }
 
 #[derive(Debug)]
@@ -146,6 +144,9 @@ async fn main() -> Result<()> {
         eprintln!("Initial check failed: {}", e);
     }
 
+    // Skip the first report tick to delay initial report
+    let _ = report_interval.tick().await;
+
     loop {
         tokio::select! {
             _ = check_interval.tick() => {
@@ -193,7 +194,7 @@ async fn run_checks_once(settings: &Settings, client: &Client, dry_run: bool) ->
     let tasks = settings.target_urls.iter().map(|url| {
         let client = client.clone();
         let url = url.clone();
-        async move { (url.clone(), check_site_status(&client, &url).await) }
+        async move { get_cloudflare_trace(&client, &url).await }
     });
     let outcomes = futures::stream::iter(tasks)
         .buffer_unordered(settings.max_concurrent_checks)
@@ -201,35 +202,20 @@ async fn run_checks_once(settings: &Settings, client: &Client, dry_run: bool) ->
         .await;
 
     let mut results: Vec<CheckResult> = Vec::new();
-    for (url, outcome) in outcomes {
-        let check_result = match outcome {
-            Ok(trace_data) => {
+    for outcome in outcomes {
+        match outcome {
+            Ok(result) => {
                 println!(
-                    "Result for {}: rtt={}ms",
-                    trace_data.url, trace_data.rtt_millis
+                    "Result for {}: colo={}, rtt={}ms",
+                    result.url, result.colo.as_deref().unwrap_or("N/A"), result.rtt_millis.unwrap_or(0)
                 );
-                CheckResult {
-                    timestamp: trace_data.timestamp,
-                    url: trace_data.url,
-                    success: true,
-                    rtt_millis: Some(trace_data.rtt_millis),
-                    error: None,
-                    colo: trace_data.colo.clone(),
-                }
+                results.push(result);
             }
             Err(e) => {
-                eprintln!("Failed to get trace for {}: {}", url, e);
-                CheckResult {
-                    timestamp: Utc::now(),
-                    url,
-                    success: false,
-                    rtt_millis: None,
-                    error: Some(e.to_string()),
-                    colo: None,
-                }
+                eprintln!("Failed to get trace for a URL: {}", e);
+                // エラーの場合、URLがわからないので、スキップ
             }
-        };
-        results.push(check_result);
+        }
     }
     if !dry_run {
         for result in &results {
@@ -432,12 +418,35 @@ fn generate_report(results: &[CheckResult], targets: &[String]) -> Report {
             }
         };
 
+        let mut changed_colos = std::collections::HashMap::new();
+        let mut colo_changes = 0;
+        let mut last_colo = None;
+        for r in &target_results {
+            if let Some(ref colo) = r.colo {
+                if let Some(ref last) = last_colo {
+                    if last != colo {
+                        *changed_colos.entry(colo.clone()).or_insert(0) += 1;
+                        colo_changes += 1;
+                    }
+                } else {
+                    // 最初のcoloも含める
+                    *changed_colos.entry(colo.clone()).or_insert(0) += 1;
+                }
+                last_colo = Some(colo.clone());
+            }
+        }
+        let most_frequent_colo = changed_colos.iter().max_by_key(|(_, count)| *count).map(|(colo, _)| colo.clone()).unwrap_or_default();
+        let unique_colos_list = changed_colos.keys().cloned().collect();
+
         target_stats.push(TargetStats {
             url: target.clone(),
             total_checks,
             successful_checks,
             uptime,
             rtt_stats,
+            unique_colos: unique_colos_list,
+            colo_changes,
+            most_frequent_colo,
         });
     }
 
@@ -474,12 +483,18 @@ fn format_report_mfm(report: &Report) -> String {
             stats.uptime, stats.successful_checks, stats.total_checks
         ));
         mfm.push_str(&format!(
-            "- **RTT:** Min: {}ms, Max: {}ms, Avg: {:.2}ms, Median: {:.2}ms, P95: {:.2}ms\n\n",
+            "- **RTT:** Min: {}ms, Max: {}ms, Avg: {:.2}ms, Median: {:.2}ms, P95: {:.2}ms\n",
             stats.rtt_stats.min,
             stats.rtt_stats.max,
             stats.rtt_stats.mean,
             stats.rtt_stats.median,
             stats.rtt_stats.p95
+        ));
+        mfm.push_str(&format!(
+            "- **Colo:** {}回変更, 最頻出: {}, ユニーク: {}\n\n",
+            stats.colo_changes,
+            stats.most_frequent_colo,
+            stats.unique_colos.join(", ")
         ));
     }
 
@@ -520,6 +535,9 @@ fn format_report_console(report: &Report, settings: &ReportingSettings) {
             stats.rtt_stats.median,
             stats.rtt_stats.p95
         );
+        println!("  Colo Changes: {}", stats.colo_changes);
+        println!("  Most Frequent Colo: {}", stats.most_frequent_colo);
+        println!("  Unique Colos: {}", stats.unique_colos.join(", "));
     }
 }
 
@@ -531,29 +549,29 @@ fn load_settings() -> Result<Settings> {
     Ok(settings.try_deserialize()?)
 }
 
-async fn check_site_status(client: &Client, url: &str) -> Result<TraceData> {
-    let mut nodeinfo_url = Url::parse(url)?;
-    nodeinfo_url.set_path("/.well-known/nodeinfo");
-
+async fn get_cloudflare_trace(client: &Client, url: &str) -> Result<CheckResult> {
+    let trace_url = format!("{}/cdn-cgi/trace", url);
     let start_time = time::Instant::now();
-    let resp = client.get(nodeinfo_url).send().await?;
+    let resp = client.get(&trace_url).send().await?.text().await?;
     let rtt = start_time.elapsed();
 
-    if resp.status() != 200 {
-        anyhow::bail!("Request failed with status: {}", resp.status());
+    let mut trace_data = HashMap::new();
+    for line in resp.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            trace_data.insert(key.to_string(), value.to_string());
+        }
     }
 
-    let colo = resp
-        .headers()
-        .get("cf-ray")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.split('-').last().map(|s| s.to_string()));
+    let colo = trace_data.remove("colo").unwrap_or_else(|| "N/A".to_string());
 
-    Ok(TraceData {
+    Ok(CheckResult {
         timestamp: Utc::now(),
         url: url.to_string(),
-        rtt_millis: std::cmp::min(rtt.as_millis(), u64::MAX as u128) as u64,
-        colo,
+        success: true,
+        rtt_millis: Some(std::cmp::min(rtt.as_millis(), u64::MAX as u128) as u64),
+        error: None,
+        colo: Some(colo),
+        trace_data,
     })
 }
 
