@@ -1,12 +1,12 @@
 # tracekey
 
-`tracekey` is a monitoring and reporting tool written in Rust. It periodically checks Cloudflare colocation (`colo`) and Round Trip Time (RTT) for a list of URLs. It can log results to JSON or CSV, send notifications to Misskey on colo changes, and generate periodic statistical reports.
+`tracekey` is a monitoring and reporting tool written in Rust. It periodically checks Cloudflare colocation (`colo`) and Round Trip Time (RTT) for a list of URLs. It can log results to JSON/JSONL, send notifications to Misskey on colo changes, and generate periodic statistical reports.
 
 ## Features
 
 - **Monitoring:**
   - Monitors multiple URLs for Cloudflare colocation changes and RTT.
-  - Logs check results to either JSON or CSV files.
+  - Logs check results to either JSON or JSONL files.
   - Sends notifications to Misskey when a colocation change is detected.
   - Configurable check interval, user-agent, and request timeouts.
 - **Reporting:**
@@ -67,7 +67,6 @@ All settings are managed in the `config/default.toml` file. Here are the main co
 
 - `misskey_url`: URL of the Misskey instance (e.g., "<https://misskey.io>")
 - `misskey_token`: Misskey API token (leave empty to disable)
-- `misskey_visibility`: Post visibility ("public", "home", "followers")
 
 ### Targets
 
@@ -78,11 +77,11 @@ All settings are managed in the `config/default.toml` file. Here are the main co
 - `check_interval_seconds`: Check interval in seconds
 - `user_agent`: User-agent for requests
 - `request_timeout_seconds`: Request timeout in seconds
-- `max_concurrent_checks`: Maximum number of concurrent checks. Can be overridden by the `APP_MAX_CONCURRENT_CHECKS` environment variable.
+- `max_concurrent_checks`: The maximum number of concurrent checks. It can be overridden by the `APP_MAX_CONCURRENT_CHECKS` environment variable.
 
 ### Output Settings
 
-- `output_format`: Output format ("jsonl", "none"). "json" is also accepted for backward compatibility.
+- `output_format`: Output format ("jsonl", "none"). "json" is accepted as an alias of JSON Lines for backward compatibility.
 - `output_path`: Path to the output file. An example log file can be found at `examples/trace_log.example.jsonl`.
 
 ### Reporting Settings
@@ -91,6 +90,7 @@ All settings are managed in the `config/default.toml` file. Here are the main co
 - `reporting.interval`: Reporting interval (e.g., "24h")
 - `reporting.output_to_console`: Output to console
 - `reporting.output_to_misskey`: Post to Misskey
+- `reporting.misskey_visibility`: Post visibility ("public", "home", "followers")
 - `reporting.rtt_threshold_ms`: RTT threshold for console highlighting
 - `reporting.uptime_threshold_percent`: Uptime threshold for console highlighting
 

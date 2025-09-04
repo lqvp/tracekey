@@ -5,7 +5,7 @@ use colored::*;
 use config::{Config, File};
 use futures::stream::StreamExt;
 use humantime::parse_duration;
-use rand::Rng;
+use rand::{rng, Rng};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use statistical::{mean, median};
@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
 
     if settings.reporting.enabled && settings.output_format == "none" {
         anyhow::bail!(
-            "Reporting is enabled, but output_format is set to 'none'. Please use 'json'."
+            "Reporting is enabled, but output_format is set to 'none'. Please use 'json' or 'jsonl'."
         );
     }
 
@@ -133,6 +133,9 @@ async fn main() -> Result<()> {
     let check_interval_duration = Duration::from_secs(settings.check_interval_seconds);
     if check_interval_duration.is_zero() {
         anyhow::bail!("Check interval cannot be 0");
+    }
+    if settings.max_concurrent_checks == 0 {
+        anyhow::bail!("max_concurrent_checks cannot be 0");
     }
     let mut check_interval = time::interval(check_interval_duration);
     check_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -252,10 +255,11 @@ async fn run_checks_once(settings: &Settings, client: &Client, dry_run: bool) ->
                         if settings.reporting.output_to_misskey {
                             if let Some(token) = &settings.misskey_token {
                                 if !token.is_empty() {
-                                    let client = Client::new();
+                                    // 監視用クライアントの設定(UA/timeout)を流用
+                                    let misskey_client = client.clone();
                                     println!("Posting colo change to Misskey...");
                                     post_to_misskey(
-                                        &client,
+                                        &misskey_client,
                                         &settings.misskey_url,
                                         token,
                                         &message,
@@ -340,7 +344,10 @@ async fn run_report_once(settings: &Settings, cli: &Cli) -> Result<()> {
             println!("\n--- Misskey Dry Run ---\n{}", mfm_report);
         } else if let Some(token) = &settings.misskey_token {
             if !token.is_empty() {
-                let client = Client::new();
+                let client = Client::builder()
+                    .user_agent(&settings.user_agent)
+                    .timeout(Duration::from_secs(settings.request_timeout_seconds))
+                    .build()?;
                 println!("Posting report to Misskey...");
                 post_to_misskey(
                     &client,
@@ -642,7 +649,7 @@ async fn post_to_misskey(
         }
 
         time::sleep(delay).await;
-        delay = delay * 2 + Duration::from_millis(rand::rng().random_range(0..1000));
+        delay = delay * 2 + Duration::from_millis(rng().random_range(0..1000));
     }
 }
 
