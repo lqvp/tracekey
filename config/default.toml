@@ -13,8 +13,8 @@ request_timeout_seconds = 10
 max_concurrent_checks = 10
 
 # Output settings
-# Format can be "json" or "none".
-output_format = "json"
+# Format can be "json" (JSON Lines) or "jsonl" or "none".
+output_format = "jsonl"
 output_path = "trace_log.jsonl"
 
 # Reporting settings

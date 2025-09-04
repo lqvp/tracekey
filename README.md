@@ -78,11 +78,12 @@ All settings are managed in the `config/default.toml` file. Here are the main co
 - `check_interval_seconds`: Check interval in seconds
 - `user_agent`: User-agent for requests
 - `request_timeout_seconds`: Request timeout in seconds
+- `max_concurrent_checks`: Maximum number of concurrent checks. Can be overridden by the `APP_MAX_CONCURRENT_CHECKS` environment variable.
 
 ### Output Settings
 
-- `output_format`: Output format ("json", "csv", "none")
-- `output_path`: Path to the output file
+- `output_format`: Output format ("jsonl", "none"). "json" is also accepted for backward compatibility.
+- `output_path`: Path to the output file. An example log file can be found at `examples/trace_log.example.jsonl`.
 
 ### Reporting Settings
 

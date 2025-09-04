@@ -102,7 +102,11 @@ async fn main() -> Result<()> {
 
     // URL バリデーション
     for url in &settings.target_urls {
-        Url::parse(url).map_err(|e| anyhow::anyhow!("Invalid URL {}: {}", url, e))?;
+        let parsed = Url::parse(url).map_err(|e| anyhow::anyhow!("Invalid URL {}: {}", url, e))?;
+        match parsed.scheme() {
+            "http" | "https" => {}
+            other => anyhow::bail!("Unsupported URL scheme '{}' for {}", other, url),
+        }
     }
 
     if settings.reporting.enabled && settings.output_format == "none" {
@@ -191,10 +195,12 @@ async fn run_checks_once(settings: &Settings, client: &Client, dry_run: bool) ->
         m
     });
 
-    let tasks = settings.target_urls.iter().map(|url| {
+    let tasks = settings.target_urls.iter().cloned().map(|url| {
         let client = client.clone();
-        let url = url.clone();
-        async move { get_cloudflare_trace(&client, &url).await }
+        async move {
+            let res = get_cloudflare_trace(&client, &url).await;
+            (url, res)
+        }
     });
     let outcomes = futures::stream::iter(tasks)
         .buffer_unordered(settings.max_concurrent_checks)
@@ -204,16 +210,26 @@ async fn run_checks_once(settings: &Settings, client: &Client, dry_run: bool) ->
     let mut results: Vec<CheckResult> = Vec::new();
     for outcome in outcomes {
         match outcome {
-            Ok(result) => {
+            (_url, Ok(result)) => {
                 println!(
                     "Result for {}: colo={}, rtt={}ms",
-                    result.url, result.colo.as_deref().unwrap_or("N/A"), result.rtt_millis.unwrap_or(0)
+                    result.url,
+                    result.colo.as_deref().unwrap_or("N/A"),
+                    result.rtt_millis.unwrap_or(0)
                 );
                 results.push(result);
             }
-            Err(e) => {
-                eprintln!("Failed to get trace for a URL: {}", e);
-                // エラーの場合、URLがわからないので、スキップ
+            (url, Err(e)) => {
+                eprintln!("Failed to get trace for {}: {}", url, e);
+                results.push(CheckResult {
+                    timestamp: Utc::now(),
+                    url,
+                    success: false,
+                    rtt_millis: None,
+                    error: Some(e.to_string()),
+                    colo: None,
+                    trace_data: HashMap::new(),
+                });
             }
         }
     }
@@ -436,7 +452,8 @@ fn generate_report(results: &[CheckResult], targets: &[String]) -> Report {
             }
         }
         let most_frequent_colo = changed_colos.iter().max_by_key(|(_, count)| *count).map(|(colo, _)| colo.clone()).unwrap_or_default();
-        let unique_colos_list = changed_colos.keys().cloned().collect();
+        let mut unique_colos_list: Vec<_> = changed_colos.keys().cloned().collect();
+        unique_colos_list.sort();
 
         target_stats.push(TargetStats {
             url: target.clone(),
@@ -552,7 +569,13 @@ fn load_settings() -> Result<Settings> {
 async fn get_cloudflare_trace(client: &Client, url: &str) -> Result<CheckResult> {
     let trace_url = format!("{}/cdn-cgi/trace", url);
     let start_time = time::Instant::now();
-    let resp = client.get(&trace_url).send().await?.text().await?;
+    let resp = client
+        .get(&trace_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
     let rtt = start_time.elapsed();
 
     let mut trace_data = HashMap::new();
@@ -632,7 +655,7 @@ async fn write_results(path: String, format: String, results: Vec<CheckResult>) 
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
 
         match format.as_str() {
-            "json" => {
+            "json" | "jsonl" => {
                 let mut file = std::io::BufWriter::new(file);
                 for result in &results {
                     let json_string = serde_json::to_string(result)?;
@@ -664,7 +687,7 @@ async fn load_check_results(
         let mut results = Vec::new();
 
         match format.as_str() {
-            "json" => {
+            "json" | "jsonl" => {
                 for (lineno, line) in reader.lines().enumerate() {
                     let line = line?;
                     if line.trim().is_empty() {
