@@ -2,7 +2,6 @@
 misskey_url = "https://misskey.io"
 # To disable Misskey integration, leave this token empty.
 misskey_token = ""
-misskey_visibility = "home"
 
 # Target URLs to monitor
 target_urls = ["https://misskey.io", "https://misskey.vip"]
@@ -11,11 +10,14 @@ target_urls = ["https://misskey.io", "https://misskey.vip"]
 check_interval_seconds = 300
 user_agent = "Tracekey/1.0"
 request_timeout_seconds = 10
+max_concurrent_checks = 10
+colo_change_notify_misskey = true
+misskey_concurrent_notifications = 2
 
 # Output settings
-# Format can be "json", "csv", or "none".
-output_format = "json"
-output_path = "trace_log.json"
+# Format: "jsonl" (JSON Lines), "json" (alias of JSON Lines), or "none".
+output_format = "jsonl"
+output_path = "trace_log.jsonl"
 
 # Reporting settings
 [reporting]
@@ -25,4 +27,6 @@ output_to_console = true
 output_to_misskey = true
 misskey_visibility = "home" # "public", "home", "followers"
 rtt_threshold_ms = 500 # RTT threshold for console highlighting
+p95_rtt_threshold_ms = 1000 # P95 RTT threshold for console highlighting
 uptime_threshold_percent = 99.5 # Uptime threshold for console highlighting
+critical_uptime_threshold_percent = 90.0 # Critical uptime threshold for console highlighting
