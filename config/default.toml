@@ -11,6 +11,7 @@ check_interval_seconds = 300
 user_agent = "Tracekey/1.0"
 request_timeout_seconds = 10
 max_concurrent_checks = 10
+colo_change_notify_misskey = true
 
 # Output settings
 # Format can be "json" (JSON Lines) or "jsonl" or "none".
@@ -25,4 +26,6 @@ output_to_console = true
 output_to_misskey = true
 misskey_visibility = "home" # "public", "home", "followers"
 rtt_threshold_ms = 500 # RTT threshold for console highlighting
+p95_rtt_threshold_ms = 1000 # P95 RTT threshold for console highlighting
 uptime_threshold_percent = 99.5 # Uptime threshold for console highlighting
+critical_uptime_threshold_percent = 90.0 # Critical uptime threshold for console highlighting

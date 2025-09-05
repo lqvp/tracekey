@@ -63,36 +63,78 @@ cargo run --release -- --report
 
 All settings are managed in the `config/default.toml` file. Here are the main configuration options:
 
-### Misskey Integration (Optional)
+**Note:** If `reporting.enabled` is `true`, `output_format` cannot be `"none"`.
 
-- `misskey_url`: URL of the Misskey instance (e.g., "<https://misskey.io>")
+### Example `config/default.toml`
+
+```toml
+# Misskey integration (optional)
+misskey_url = "https://misskey.io"
+# To disable Misskey integration, leave this token empty.
+misskey_token = ""
+
+# Target URLs to monitor
+target_urls = ["https://misskey.io", "https://misskey.vip"]
+
+# Monitoring settings
+check_interval_seconds = 300
+user_agent = "Tracekey/1.0"
+request_timeout_seconds = 10
+max_concurrent_checks = 10
+colo_change_notify_misskey = true
+
+# Output settings
+# Format can be "json" (JSON Lines) or "jsonl" or "none".
+output_format = "jsonl"
+output_path = "trace_log.jsonl"
+
+# Reporting settings
+[reporting]
+enabled = true
+interval = "24h" # Reporting interval for periodic execution
+output_to_console = true
+output_to_misskey = true
+misskey_visibility = "home" # "public", "home", "followers"
+rtt_threshold_ms = 500 # RTT threshold for console highlighting
+p95_rtt_threshold_ms = 1000 # P95 RTT threshold for console highlighting
+uptime_threshold_percent = 99.5 # Uptime threshold for console highlighting
+critical_uptime_threshold_percent = 90.0 # Critical uptime threshold for console highlighting```
+
+### Configuration Details
+
+#### Misskey Integration (Optional)
+
+- `misskey_url`: URL of the Misskey instance (e.g., "https://misskey.io")
 - `misskey_token`: Misskey API token (leave empty to disable)
 
-### Targets
+#### Targets
 
 - `target_urls`: List of URLs to monitor (e.g., ["https://misskey.io", "https://misskey.vip"])
 
-### Monitoring Settings
+#### Monitoring Settings
 
 - `check_interval_seconds`: Check interval in seconds
 - `user_agent`: User-agent for requests
 - `request_timeout_seconds`: Request timeout in seconds
-- `max_concurrent_checks`: The maximum number of concurrent checks. It can be overridden by the `APP_MAX_CONCURRENT_CHECKS` environment variable.
+- `max_concurrent_checks`: The maximum number of concurrent checks.
+- `colo_change_notify_misskey`: Enable instant notifications to Misskey on colocation changes.
 
-### Output Settings
+#### Output Settings
 
 - `output_format`: Output format ("jsonl", "none"). "json" is accepted as an alias of JSON Lines for backward compatibility.
-- `output_path`: Path to the output file. An example log file can be found at `examples/trace_log.example.jsonl`.
+- `output_path`: Path to the output file.
 
-### Reporting Settings
+#### Reporting Settings
 
 - `reporting.enabled`: Enable reporting functionality
 - `reporting.interval`: Reporting interval (e.g., "24h")
 - `reporting.output_to_console`: Output to console
 - `reporting.output_to_misskey`: Post to Misskey
 - `reporting.misskey_visibility`: Post visibility ("public", "home", "followers")
-- `reporting.rtt_threshold_ms`: RTT threshold for console highlighting
-- `reporting.uptime_threshold_percent`: Uptime threshold for console highlighting
+- `reporting.rtt_threshold_ms`: RTT threshold for console highlighting (mean)
+- `reporting.p95_rtt_threshold_ms`: RTT threshold for console highlighting (p95)
+- `reporting.uptime_threshold_percent`: Uptime threshold for console highlighting (yellow)
+- `reporting.critical_uptime_threshold_percent`: Critical uptime threshold for console highlighting (red)
 
 ## License
 
