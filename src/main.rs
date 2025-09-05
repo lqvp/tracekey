@@ -24,8 +24,9 @@ struct Cli {
     #[arg(long)]
     report: bool,
     #[arg(long)]
+    #[arg(long, value_parser = clap::value_parser!(DateTime<Utc>))]
     since: Option<DateTime<Utc>>,
-    #[arg(long)]
+    #[arg(long, value_parser = clap::value_parser!(DateTime<Utc>))]
     until: Option<DateTime<Utc>>,
     #[arg(long)]
     dry_run: bool,
@@ -74,6 +75,8 @@ struct LastSuccessState {
     url: String,
     colo: Option<String>,
     timestamp: DateTime<Utc>,
+    #[serde(default = "Utc::now")]
+    last_notification_timestamp: DateTime<Utc>,
 }
 
 #[derive(Debug)]
@@ -165,11 +168,6 @@ async fn main() -> Result<()> {
     }
     let mut report_interval = time::interval(report_interval_duration);
 
-    // Run initial check immediately
-    if let Err(e) = run_checks_once(&settings, &client, misskey_semaphore.clone()).await {
-        eprintln!("Initial check failed: {}", e);
-    }
-
     // Skip the first report tick to delay initial report
     let _ = report_interval.tick().await;
 
@@ -206,11 +204,11 @@ async fn run_checks_once(
 ) -> Result<()> {
     println!("Running check...");
 
-    let prev_map: HashMap<String, Option<String>> = load_last_success_states()
+    let mut prev_states: HashMap<String, LastSuccessState> = load_last_success_states()
         .await
         .unwrap_or_default()
         .into_iter()
-        .map(|state| (state.url, state.colo))
+        .map(|state| (state.url.clone(), state))
         .collect();
 
     let tasks = settings.target_urls.iter().cloned().map(|url| {
@@ -254,20 +252,26 @@ async fn run_checks_once(
     let mut colo_change_messages = Vec::new();
     for result in &results {
         if result.success {
-            if let (Some(curr), Some(prev)) = (
-                result.colo.as_ref(),
-                prev_map.get(&result.url).and_then(|o| o.as_ref()),
-            ) {
-                if curr != prev {
-                    let message = format!(
-                        "Cloudflare colocation for ?[{}]({}) changed: `{}` -> `{}` (RTT: {}ms)",
-                        result.url,
-                        result.url,
-                        prev,
-                        curr,
-                        result.rtt_millis.unwrap_or(0)
-                    );
-                    colo_change_messages.push(message);
+            if let Some(prev_state) = prev_states.get_mut(&result.url) {
+                if let (Some(curr_colo), Some(prev_colo)) =
+                    (result.colo.as_ref(), prev_state.colo.as_ref())
+                {
+                    if curr_colo != prev_colo {
+                        let now = Utc::now();
+                        if now - prev_state.last_notification_timestamp > ChronoDuration::minutes(5)
+                        {
+                            let message = format!(
+                                "Cloudflare colocation for ?[{}]({}) changed: `{}` -> `{}` (RTT: {}ms)",
+                                result.url,
+                                result.url,
+                                prev_colo,
+                                curr_colo,
+                                result.rtt_millis.unwrap_or(0)
+                            );
+                            colo_change_messages.push(message);
+                            prev_state.last_notification_timestamp = now;
+                        }
+                    }
                 }
             }
         }
@@ -307,10 +311,17 @@ async fn run_checks_once(
     let success_states: Vec<LastSuccessState> = results
         .iter()
         .filter(|r| r.success)
-        .map(|r| LastSuccessState {
-            url: r.url.clone(),
-            colo: r.colo.clone(),
-            timestamp: r.timestamp,
+        .map(|r| {
+            let last_notification_timestamp = prev_states
+                .get(&r.url)
+                .map(|s| s.last_notification_timestamp)
+                .unwrap_or_else(Utc::now);
+            LastSuccessState {
+                url: r.url.clone(),
+                colo: r.colo.clone(),
+                timestamp: r.timestamp,
+                last_notification_timestamp,
+            }
         })
         .collect();
 
@@ -505,7 +516,7 @@ fn generate_report(
 
         let most_frequent_colo = colo_frequency
             .iter()
-            .max_by_key(|(_, count)| *count)
+            .max_by(|(ca, a), (cb, b)| a.cmp(b).then_with(|| ca.cmp(cb)))
             .map(|(colo, _)| colo.clone())
             .unwrap_or_default();
 
@@ -687,9 +698,10 @@ async fn get_cloudflare_trace(client: &Client, url: &str) -> Result<CheckResult>
         .await?;
     let rtt = start_time.elapsed();
 
+    const COLO_PREFIX: &str = "colo=";
     let colo_opt = resp
         .lines()
-        .find_map(|line| line.strip_prefix("colo="))
+        .find_map(|line| line.strip_prefix(COLO_PREFIX))
         .map(|s| s.to_string());
 
     Ok(CheckResult {
@@ -729,6 +741,14 @@ async fn post_to_misskey(
             Ok(resp) => {
                 let status = resp.status();
                 let error_text = resp.text().await.unwrap_or_else(|_| "No body".to_string());
+                if status.is_client_error() {
+                    // クライアントエラーは即失敗
+                    return Err(anyhow::anyhow!(
+                        "Misskey API client error {} - {}",
+                        status,
+                        error_text
+                    ));
+                }
                 eprintln!(
                     "Attempt {} failed: Misskey API returned status {} - {}",
                     attempts, status, error_text
@@ -770,6 +790,7 @@ async fn write_results(path: String, format: String, results: Vec<CheckResult>) 
                     serde_json::to_writer(&mut file, result)?;
                     file.write_all(b"\n")?;
                 }
+                file.flush()?;
             }
             other => anyhow::bail!("unsupported output_format: {}", other),
         }
@@ -811,6 +832,10 @@ async fn load_check_results(
                             }
                         }
                         Err(e) => {
+                            if e.is_eof() {
+                                // 追記中の未完行とみなして終了
+                                break;
+                            }
                             eprintln!("Skip malformed line {}: {}", lineno + 1, e);
                         }
                     }
@@ -860,10 +885,17 @@ async fn save_last_success_states(states: &[LastSuccessState]) -> Result<()> {
                 .write(true)
                 .truncate(true)
                 .open(&tmp_file)?;
-            serde_json::to_writer_pretty(file, &updated_states)?;
+            let mut writer = std::io::BufWriter::new(&file);
+            serde_json::to_writer_pretty(&mut writer, &updated_states)?;
+            writer.flush()?;
+            file.sync_all()?;
         }
         // アトミック入替
         std::fs::rename(&tmp_file, &state_file)?;
+        // ディレクトリエントリの永続化
+        if let Ok(dir) = StdFile::open(&state_dir) {
+            let _ = dir.sync_all();
+        }
         Ok(())
     })
     .await??;
