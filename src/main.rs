@@ -12,7 +12,9 @@ use statistical::{mean, median};
 use std::collections::HashMap;
 use std::fs::{File as StdFile, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 use tokio::time::{self, MissedTickBehavior};
 use url::Url;
 
@@ -54,6 +56,7 @@ struct Settings {
     output_path: String,
     max_concurrent_checks: usize,
     colo_change_notify_misskey: bool, // 即時通知の設定を分離
+    misskey_concurrent_notifications: usize,
     reporting: ReportingSettings,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -149,6 +152,10 @@ async fn main() -> Result<()> {
     if settings.max_concurrent_checks == 0 {
         anyhow::bail!("max_concurrent_checks cannot be 0");
     }
+    if settings.misskey_concurrent_notifications == 0 {
+        anyhow::bail!("misskey_concurrent_notifications cannot be 0");
+    }
+    let misskey_semaphore = Arc::new(Semaphore::new(settings.misskey_concurrent_notifications));
     let mut check_interval = time::interval(check_interval_duration);
     check_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -159,7 +166,7 @@ async fn main() -> Result<()> {
     let mut report_interval = time::interval(report_interval_duration);
 
     // Run initial check immediately
-    if let Err(e) = run_checks_once(&settings, &client, false).await {
+    if let Err(e) = run_checks_once(&settings, &client, misskey_semaphore.clone()).await {
         eprintln!("Initial check failed: {}", e);
     }
 
@@ -169,7 +176,7 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             _ = check_interval.tick() => {
-                if let Err(e) = run_checks_once(&settings, &client, false).await {
+                if let Err(e) = run_checks_once(&settings, &client, misskey_semaphore.clone()).await {
                     eprintln!("Scheduled check failed: {}", e);
                 }
             },
@@ -192,7 +199,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_checks_once(settings: &Settings, client: &Client, dry_run: bool) -> Result<()> {
+async fn run_checks_once(
+    settings: &Settings,
+    client: &Client,
+    misskey_semaphore: Arc<Semaphore>,
+) -> Result<()> {
     println!("Running check...");
 
     let prev_map: HashMap<String, Option<String>> = load_last_success_states()
@@ -239,77 +250,73 @@ async fn run_checks_once(settings: &Settings, client: &Client, dry_run: bool) ->
             }
         }
     }
-    if !dry_run {
-        // Colo変更検知とMisskey投稿
-        for result in &results {
-            if result.success {
-                if let (Some(curr), Some(prev)) = (
-                    result.colo.as_ref(),
-                    prev_map.get(&result.url).and_then(|o| o.as_ref()),
-                ) {
-                    if curr != prev {
-                        let message = format!(
-                            "Cloudflare colocation for ?[{}]({}) changed: `{}` -> `{}` (RTT: {}ms)",
-                            result.url,
-                            result.url,
-                            prev,
-                            curr,
-                            result.rtt_millis.unwrap_or(0)
-                        );
-                        if settings.colo_change_notify_misskey {
-                            if let Some(token) = &settings.misskey_token {
-                                if !token.is_empty() {
-                                    // バックグラウンドでMisskey通知を送信
-                                    let misskey_client = client.clone();
-                                    let misskey_url = settings.misskey_url.clone();
-                                    let misskey_token = token.clone();
-                                    let misskey_visibility =
-                                        settings.reporting.misskey_visibility.clone();
-                                    let message_clone = message.clone();
-
-                                    tokio::spawn(async move {
-                                        println!("Posting colo change to Misskey...");
-                                        match post_to_misskey(
-                                            &misskey_client,
-                                            &misskey_url,
-                                            &misskey_token,
-                                            &message_clone,
-                                            &misskey_visibility,
-                                        )
-                                        .await
-                                        {
-                                            Ok(_) => println!(
-                                                "Colo change posted to Misskey successfully."
-                                            ),
-                                            Err(e) => eprintln!(
-                                                "Failed to post colo change to Misskey: {}",
-                                                e
-                                            ),
-                                        }
-                                    });
-                                }
-                            }
-                        }
-                    }
+    // Colo変更検知とMisskey投稿
+    let mut colo_change_messages = Vec::new();
+    for result in &results {
+        if result.success {
+            if let (Some(curr), Some(prev)) = (
+                result.colo.as_ref(),
+                prev_map.get(&result.url).and_then(|o| o.as_ref()),
+            ) {
+                if curr != prev {
+                    let message = format!(
+                        "Cloudflare colocation for ?[{}]({}) changed: `{}` -> `{}` (RTT: {}ms)",
+                        result.url,
+                        result.url,
+                        prev,
+                        curr,
+                        result.rtt_millis.unwrap_or(0)
+                    );
+                    colo_change_messages.push(message);
                 }
             }
         }
+    }
 
-        // 最後の成功状態を更新
-        let success_states: Vec<LastSuccessState> = results
-            .iter()
-            .filter(|r| r.success)
-            .map(|r| LastSuccessState {
-                url: r.url.clone(),
-                colo: r.colo.clone(),
-                timestamp: r.timestamp,
-            })
-            .collect();
+    if !colo_change_messages.is_empty() && settings.colo_change_notify_misskey {
+        if let Some(token) = &settings.misskey_token {
+            if !token.is_empty() {
+                let message = colo_change_messages.join("\n");
+                let misskey_client = client.clone();
+                let misskey_url = settings.misskey_url.clone();
+                let misskey_token = token.clone();
+                let misskey_visibility = settings.reporting.misskey_visibility.clone();
+                let sem_clone = misskey_semaphore.clone();
 
-        if !success_states.is_empty() {
-            if let Err(e) = save_last_success_states(&success_states).await {
-                eprintln!("Failed to save last success states: {}", e);
+                tokio::spawn(async move {
+                    let _permit = sem_clone.acquire_owned().await.unwrap();
+                    println!("Posting colo change to Misskey...");
+                    match post_to_misskey(
+                        &misskey_client,
+                        &misskey_url,
+                        &misskey_token,
+                        &message,
+                        &misskey_visibility,
+                    )
+                    .await
+                    {
+                        Ok(_) => println!("Colo change posted to Misskey successfully."),
+                        Err(e) => eprintln!("Failed to post colo change to Misskey: {}", e),
+                    }
+                });
             }
+        }
+    }
+
+    // 最後の成功状態を更新
+    let success_states: Vec<LastSuccessState> = results
+        .iter()
+        .filter(|r| r.success)
+        .map(|r| LastSuccessState {
+            url: r.url.clone(),
+            colo: r.colo.clone(),
+            timestamp: r.timestamp,
+        })
+        .collect();
+
+    if !success_states.is_empty() {
+        if let Err(e) = save_last_success_states(&success_states).await {
+            eprintln!("Failed to save last success states: {}", e);
         }
     }
 
@@ -634,12 +641,14 @@ fn format_report_console(report: &Report, settings: &ReportingSettings) {
         println!("URL: {}", stats.url.bold());
         println!("  稼働率: {}", uptime_colored);
         println!(
-            "  RTT - Min: {}ms, Max: {}ms, Avg: {}, Median: {:.2}ms, P95: {}",
+            "  RTT - Min: {}ms, Max: {}ms, Avg: {} (thr: {}ms), Median: {:.2}ms, P95: {} (thr: {}ms)",
             stats.rtt_stats.min,
             stats.rtt_stats.max,
             rtt_avg_colored,
+            settings.rtt_threshold_ms,
             stats.rtt_stats.median,
-            rtt_p95_colored
+            rtt_p95_colored,
+            settings.p95_rtt_threshold_ms
         );
         let most = if stats.most_frequent_colo.is_empty() {
             "N/A"

@@ -12,6 +12,7 @@ user_agent = "Tracekey/1.0"
 request_timeout_seconds = 10
 max_concurrent_checks = 10
 colo_change_notify_misskey = true
+misskey_concurrent_notifications = 2
 
 # Output settings
 # Format: "jsonl" (JSON Lines), "json" (alias of JSON Lines), or "none".
