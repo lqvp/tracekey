@@ -108,7 +108,8 @@ misskey_visibility = "home" # "public", "home", "followers"
 rtt_threshold_ms = 500 # RTT threshold for console highlighting
 p95_rtt_threshold_ms = 1000 # P95 RTT threshold for console highlighting
 uptime_threshold_percent = 99.5 # Uptime threshold for console highlighting
-critical_uptime_threshold_percent = 90.0 # Critical uptime threshold for console highlighting```
+critical_uptime_threshold_percent = 90.0 # Critical uptime threshold for console highlighting
+```
 
 ### Configuration Details
 
@@ -141,10 +142,10 @@ critical_uptime_threshold_percent = 90.0 # Critical uptime threshold for console
 - `reporting.output_to_console`: Output to console
 - `reporting.output_to_misskey`: Post to Misskey
 - `reporting.misskey_visibility`: Post visibility ("public", "home", "followers")
-- `reporting.rtt_threshold_ms`: RTT threshold for console highlighting (mean)
-- `reporting.p95_rtt_threshold_ms`: RTT threshold for console highlighting (p95)
-- `reporting.uptime_threshold_percent`: Uptime threshold for console highlighting (yellow)
-- `reporting.critical_uptime_threshold_percent`: Critical uptime threshold for console highlighting (red)
+- `reporting.rtt_threshold_ms`: RTT threshold for console highlighting (mean RTT will be colored red if it exceeds this value).
+- `reporting.p95_rtt_threshold_ms`: RTT threshold for console highlighting (p95 RTT will be colored red if it exceeds this value).
+- `reporting.uptime_threshold_percent`: Uptime threshold for console highlighting (uptime will be colored yellow if it falls below this value).
+- `reporting.critical_uptime_threshold_percent`: Critical uptime threshold for console highlighting (uptime will be colored red if it falls below this value).
 
 ## License
 

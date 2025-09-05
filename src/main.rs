@@ -342,6 +342,14 @@ async fn run_report_once(settings: &Settings, cli: &Cli, client: &Client) -> Res
         until - duration_chrono
     };
 
+    if since > until {
+        anyhow::bail!(
+            "--since ({}) must be earlier than or equal to --until ({})",
+            since,
+            until
+        );
+    }
+
     let filtered_results = match load_check_results(
         settings.output_path.clone(),
         settings.output_format.clone(),
@@ -633,9 +641,19 @@ fn format_report_console(report: &Report, settings: &ReportingSettings) {
             stats.rtt_stats.median,
             rtt_p95_colored
         );
+        let most = if stats.most_frequent_colo.is_empty() {
+            "N/A"
+        } else {
+            &stats.most_frequent_colo
+        };
+        let uniques = if stats.unique_colos.is_empty() {
+            "N/A".to_string()
+        } else {
+            stats.unique_colos.join(", ")
+        };
         println!("  Colo Transitions: {}", stats.colo_transitions);
-        println!("  Most Frequent Colo: {}", stats.most_frequent_colo);
-        println!("  Unique Colos: {}", stats.unique_colos.join(", "));
+        println!("  Most Frequent Colo: {}", most);
+        println!("  Unique Colos: {}", uniques);
     }
 }
 
@@ -720,7 +738,11 @@ async fn post_to_misskey(
         }
 
         time::sleep(delay).await;
-        delay = delay * 2 + Duration::from_millis(rng().random_range(0..1000));
+        // jitter は u64 を明示し、Duration は飽和演算で安全に拡大
+        let jitter_ms: u64 = rng().random_range(0u64..1000u64);
+        delay = delay
+            .saturating_mul(2)
+            .saturating_add(Duration::from_millis(jitter_ms));
     }
 }
 
