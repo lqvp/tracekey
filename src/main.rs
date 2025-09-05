@@ -1,11 +1,11 @@
 use anyhow::Result;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 use clap::Parser;
 use colored::*;
 use config::{Config, File};
 use futures::stream::StreamExt;
 use humantime::parse_duration;
-use rand::{rng, Rng};
+use rand::{Rng, rng};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use statistical::{mean, median};
@@ -53,7 +53,7 @@ struct Settings {
     output_format: String,
     output_path: String,
     max_concurrent_checks: usize,
-    colo_change_notify_misskey: bool,  // 即時通知の設定を分離
+    colo_change_notify_misskey: bool, // 即時通知の設定を分離
     reporting: ReportingSettings,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -64,8 +64,6 @@ struct CheckResult {
     rtt_millis: Option<u64>,
     error: Option<String>,
     colo: Option<String>,
-    #[serde(flatten)]
-    trace_data: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -110,6 +108,10 @@ struct Report {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let settings = load_settings()?;
+
+    if settings.reporting.p95_rtt_threshold_ms < settings.reporting.rtt_threshold_ms {
+        anyhow::bail!("p95_rtt_threshold_ms must be greater than or equal to rtt_threshold_ms");
+    }
 
     // URL バリデーション
     for url in &settings.target_urls {
@@ -233,7 +235,6 @@ async fn run_checks_once(settings: &Settings, client: &Client, dry_run: bool) ->
                     rtt_millis: None,
                     error: Some(e.to_string()),
                     colo: None,
-                    trace_data: HashMap::new(),
                 });
             }
         }
@@ -262,9 +263,10 @@ async fn run_checks_once(settings: &Settings, client: &Client, dry_run: bool) ->
                                     let misskey_client = client.clone();
                                     let misskey_url = settings.misskey_url.clone();
                                     let misskey_token = token.clone();
-                                    let misskey_visibility = settings.reporting.misskey_visibility.clone();
+                                    let misskey_visibility =
+                                        settings.reporting.misskey_visibility.clone();
                                     let message_clone = message.clone();
-                                    
+
                                     tokio::spawn(async move {
                                         println!("Posting colo change to Misskey...");
                                         match post_to_misskey(
@@ -276,8 +278,13 @@ async fn run_checks_once(settings: &Settings, client: &Client, dry_run: bool) ->
                                         )
                                         .await
                                         {
-                                            Ok(_) => println!("Colo change posted to Misskey successfully."),
-                                            Err(e) => eprintln!("Failed to post colo change to Misskey: {}", e),
+                                            Ok(_) => println!(
+                                                "Colo change posted to Misskey successfully."
+                                            ),
+                                            Err(e) => eprintln!(
+                                                "Failed to post colo change to Misskey: {}",
+                                                e
+                                            ),
                                         }
                                     });
                                 }
@@ -298,7 +305,7 @@ async fn run_checks_once(settings: &Settings, client: &Client, dry_run: bool) ->
                 timestamp: r.timestamp,
             })
             .collect();
-        
+
         if !success_states.is_empty() {
             if let Err(e) = save_last_success_states(&success_states).await {
                 eprintln!("Failed to save last success states: {}", e);
@@ -310,7 +317,7 @@ async fn run_checks_once(settings: &Settings, client: &Client, dry_run: bool) ->
         if let Err(e) = write_results(
             settings.output_path.clone(),
             settings.output_format.clone(),
-            results.clone(),
+            results,
         )
         .await
         {
@@ -411,7 +418,12 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     }
 }
 
-fn generate_report(results: &[CheckResult], targets: &[String], since: DateTime<Utc>, until: DateTime<Utc>) -> Report {
+fn generate_report(
+    results: &[CheckResult],
+    targets: &[String],
+    since: DateTime<Utc>,
+    until: DateTime<Utc>,
+) -> Report {
     let mut target_stats = Vec::new();
     for target in targets {
         let mut target_results: Vec<_> = results
@@ -468,36 +480,36 @@ fn generate_report(results: &[CheckResult], targets: &[String], since: DateTime<
                 p95: 0.0,
             }
         };
-// 実際の観測回数ベースで最頻出coloを算出
-let mut colo_frequency = std::collections::HashMap::new();
-for r in &target_results {
-    if let Some(ref colo) = r.colo {
-        *colo_frequency.entry(colo.clone()).or_insert(0) += 1;
-    }
-}
-
-let most_frequent_colo = colo_frequency
-    .iter()
-    .max_by_key(|(_, count)| *count)
-    .map(|(colo, _)| colo.clone())
-    .unwrap_or_default();
-
-let mut unique_colos_list: Vec<_> = colo_frequency.keys().cloned().collect();
-unique_colos_list.sort();
-
-// colo遷移回数を算出
-let mut colo_transitions = 0;
-let mut last_colo = None;
-for r in &target_results {
-    if let Some(ref colo) = r.colo {
-        if let Some(ref last) = last_colo {
-            if last != colo {
-                colo_transitions += 1;
+        // 実際の観測回数ベースで最頻出coloを算出
+        let mut colo_frequency = std::collections::HashMap::new();
+        for r in &target_results {
+            if let Some(ref colo) = r.colo {
+                *colo_frequency.entry(colo.clone()).or_insert(0) += 1;
             }
         }
-        last_colo = Some(colo.clone());
-    }
-}
+
+        let most_frequent_colo = colo_frequency
+            .iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(colo, _)| colo.clone())
+            .unwrap_or_default();
+
+        let mut unique_colos_list: Vec<_> = colo_frequency.keys().cloned().collect();
+        unique_colos_list.sort();
+
+        // colo遷移回数を算出
+        let mut colo_transitions = 0;
+        let mut last_colo = None;
+        for r in &target_results {
+            if let Some(ref colo) = r.colo {
+                if let Some(ref last) = last_colo {
+                    if last != colo {
+                        colo_transitions += 1;
+                    }
+                }
+                last_colo = Some(colo.clone());
+            }
+        }
         target_stats.push(TargetStats {
             url: target.clone(),
             total_checks,
@@ -533,15 +545,15 @@ for r in &target_results {
 
 fn format_report_mfm(report: &Report) -> String {
     let mut mfm = String::new();
-    
+
     // 期間情報をローカル時刻で表示
-    let since_local = report.since.with_timezone(&chrono::FixedOffset::east_opt(9 * 3600).unwrap());
-    let until_local = report.until.with_timezone(&chrono::FixedOffset::east_opt(9 * 3600).unwrap());
-    
+    let since_local = report.since.with_timezone(&Local);
+    let until_local = report.until.with_timezone(&Local);
+
     mfm.push_str(&format!(
         "**📊 監視レポート**\n**期間:** {} ～ {}\n\n**総合サマリー**\n- **監視対象:** {} / {} サイト\n- **全体の平均稼働率:** {:.3}%\n\n",
-        since_local.format("%Y-%m-%d %H:%M:%S JST"),
-        until_local.format("%Y-%m-%d %H:%M:%S JST"),
+        since_local.format("%Y-%m-%d %H:%M:%S %Z"),
+        until_local.format("%Y-%m-%d %H:%M:%S %Z"),
         report.reported_targets, report.configured_targets, report.overall_uptime
     ));
 
@@ -572,15 +584,15 @@ fn format_report_mfm(report: &Report) -> String {
 
 fn format_report_console(report: &Report, settings: &ReportingSettings) {
     // 期間情報をローカル時刻で表示
-    let since_local = report.since.with_timezone(&chrono::FixedOffset::east_opt(9 * 3600).unwrap());
-    let until_local = report.until.with_timezone(&chrono::FixedOffset::east_opt(9 * 3600).unwrap());
-    
+    let since_local = report.since.with_timezone(&Local);
+    let until_local = report.until.with_timezone(&Local);
+
     println!("📊 監視レポート");
     println!("-----------------");
     println!(
         "期間: {} ～ {}",
-        since_local.format("%Y-%m-%d %H:%M:%S JST"),
-        until_local.format("%Y-%m-%d %H:%M:%S JST")
+        since_local.format("%Y-%m-%d %H:%M:%S %Z"),
+        until_local.format("%Y-%m-%d %H:%M:%S %Z")
     );
     println!(
         "総合サマリー: {} / {} サイト, 平均稼働率: {:.3}%",
@@ -648,14 +660,10 @@ async fn get_cloudflare_trace(client: &Client, url: &str) -> Result<CheckResult>
         .await?;
     let rtt = start_time.elapsed();
 
-    let mut trace_data = HashMap::new();
-    for line in resp.lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            trace_data.insert(key.to_string(), value.to_string());
-        }
-    }
-
-    let colo = trace_data.remove("colo").unwrap_or_else(|| "N/A".to_string());
+    let colo_opt = resp
+        .lines()
+        .find_map(|line| line.strip_prefix("colo="))
+        .map(|s| s.to_string());
 
     Ok(CheckResult {
         timestamp: Utc::now(),
@@ -663,8 +671,7 @@ async fn get_cloudflare_trace(client: &Client, url: &str) -> Result<CheckResult>
         success: true,
         rtt_millis: Some(std::cmp::min(rtt.as_millis(), u64::MAX as u128) as u64),
         error: None,
-        colo: Some(colo),
-        trace_data,
+        colo: colo_opt,
     })
 }
 
@@ -729,8 +736,8 @@ async fn write_results(path: String, format: String, results: Vec<CheckResult>) 
             "json" | "jsonl" => {
                 let mut file = std::io::BufWriter::new(file);
                 for result in &results {
-                    let json_string = serde_json::to_string(result)?;
-                    writeln!(file, "{}", json_string)?;
+                    serde_json::to_writer(&mut file, result)?;
+                    file.write_all(b"\n")?;
                 }
             }
             other => anyhow::bail!("unsupported output_format: {}", other),
@@ -791,56 +798,57 @@ async fn save_last_success_states(states: &[LastSuccessState]) -> Result<()> {
     let state_dir = "state".to_string();
     let state_file = format!("{}/last_success.json", state_dir);
     let states = states.to_vec();
-    
+
     tokio::task::spawn_blocking(move || -> Result<()> {
         std::fs::create_dir_all(&state_dir)?;
-        
+
         let mut all_states: HashMap<String, LastSuccessState> = HashMap::new();
-        
+
         // 既存の状態を読み込み
         if let Ok(file) = StdFile::open(&state_file) {
             let reader = BufReader::new(file);
-            if let Ok(existing_states) = serde_json::from_reader::<_, Vec<LastSuccessState>>(reader) {
+            if let Ok(existing_states) = serde_json::from_reader::<_, Vec<LastSuccessState>>(reader)
+            {
                 for state in existing_states {
                     all_states.insert(state.url.clone(), state);
                 }
             }
         }
-        
+
         // 新しい状態で更新
         for state in &states {
             all_states.insert(state.url.clone(), state.clone());
         }
-        
+
         let updated_states: Vec<LastSuccessState> = all_states.into_values().collect();
-        
+
         let file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(&state_file)?;
         serde_json::to_writer_pretty(file, &updated_states)?;
-        
+
         Ok(())
     })
     .await??;
-    
+
     Ok(())
 }
 
 async fn load_last_success_states() -> Result<Vec<LastSuccessState>> {
     let state_file = "state/last_success.json";
-    
+
     tokio::task::spawn_blocking(move || -> Result<Vec<LastSuccessState>> {
         let file = match StdFile::open(state_file) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e.into()),
         };
-        
+
         let reader = BufReader::new(file);
         let states = serde_json::from_reader(reader).unwrap_or_default();
-        
+
         Ok(states)
     })
     .await?

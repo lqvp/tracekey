@@ -65,6 +65,16 @@ All settings are managed in the `config/default.toml` file. Here are the main co
 
 **Note:** If `reporting.enabled` is `true`, `output_format` cannot be `"none"`.
 
+### Overriding with Environment Variables
+
+All configuration options can be overridden with environment variables. The prefix is `APP`, and nested keys are separated by `_`.
+
+For example, to override `reporting.misskey_visibility`, you can set the following environment variable:
+
+```sh
+export APP_REPORTING_MISSKEY_VISIBILITY="followers"
+```
+
 ### Example `config/default.toml`
 
 ```toml
@@ -116,7 +126,7 @@ critical_uptime_threshold_percent = 90.0 # Critical uptime threshold for console
 - `check_interval_seconds`: Check interval in seconds
 - `user_agent`: User-agent for requests
 - `request_timeout_seconds`: Request timeout in seconds
-- `max_concurrent_checks`: The maximum number of concurrent checks.
+- `max_concurrent_checks`: The maximum number of concurrent checks. For a small number of targets, the default `10` is fine. If you are monitoring a large number of URLs, consider lowering this value to avoid rate-limiting issues.
 - `colo_change_notify_misskey`: Enable instant notifications to Misskey on colocation changes.
 
 #### Output Settings

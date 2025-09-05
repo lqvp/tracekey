@@ -14,7 +14,7 @@ max_concurrent_checks = 10
 colo_change_notify_misskey = true
 
 # Output settings
-# Format can be "json" (JSON Lines) or "jsonl" or "none".
+# Format: "jsonl" (JSON Lines), "json" (alias of JSON Lines), or "none".
 output_format = "jsonl"
 output_path = "trace_log.jsonl"
 
