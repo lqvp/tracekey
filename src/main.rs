@@ -660,7 +660,7 @@ fn format_report_console(report: &Report, settings: &ReportingSettings) {
 fn load_settings() -> Result<Settings> {
     let settings = Config::builder()
         .add_source(File::with_name("config/default.toml").required(false))
-        .add_source(config::Environment::with_prefix("APP").separator("_"))
+        .add_source(config::Environment::with_prefix("APP").separator("__"))
         .build()?;
     Ok(settings.try_deserialize()?)
 }
