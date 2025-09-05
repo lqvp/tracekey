@@ -67,13 +67,10 @@ All settings are managed in the `config/default.toml` file. Here are the main co
 
 ### Overriding with Environment Variables
 
-All configuration options can be overridden with environment variables. The prefix is `APP`, and nested keys are separated by `_`.
+All configuration options can be overridden with environment variables. The prefix is `APP`, and nested keys are separated by `__` (double underscore).
 
-For example, to override `reporting.misskey_visibility`, you can set the following environment variable:
+For example, to override `reporting.misskey_visibility`, set:
 
-```sh
-export APP_REPORTING_MISSKEY_VISIBILITY="followers"
-```
 
 ### Example `config/default.toml`
 
