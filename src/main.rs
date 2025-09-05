@@ -844,13 +844,17 @@ async fn save_last_success_states(states: &[LastSuccessState]) -> Result<()> {
 
         let updated_states: Vec<LastSuccessState> = all_states.into_values().collect();
 
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&state_file)?;
-        serde_json::to_writer_pretty(file, &updated_states)?;
-
+        let tmp_file = format!("{}/last_success.json.tmp", state_dir);
+        {
+            let file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp_file)?;
+            serde_json::to_writer_pretty(file, &updated_states)?;
+        }
+        // アトミック入替
+        std::fs::rename(&tmp_file, &state_file)?;
         Ok(())
     })
     .await??;
