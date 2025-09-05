@@ -1,153 +1,70 @@
 # tracekey
 
-`tracekey` is a monitoring and reporting tool written in Rust. It periodically checks Cloudflare colocation (`colo`) and Round Trip Time (RTT) for a list of URLs. It can log results to JSON/JSONL, send notifications to Misskey on colo changes, and generate periodic statistical reports.
+`tracekey` is a monitoring and reporting tool written in Rust that tracks Cloudflare's colocation (`colo`) and Round Trip Time (RTT). It periodically checks a list of specified URLs, saves the results in JSONL format, notifies Misskey of `colo` changes, and generates statistical reports.
 
-## Features
+## Key Features
 
 - **Monitoring:**
-  - Monitors multiple URLs for Cloudflare colocation changes and RTT.
-  - Logs check results to either JSON or JSONL files.
-  - Sends notifications to Misskey when a colocation change is detected.
-  - Configurable check interval, user-agent, and request timeouts.
+  - Monitors Cloudflare `colo` and RTT for multiple URLs.
+  - Records check results to a JSONL file.
+  - Sends notifications to Misskey upon detecting a `colo` change.
 - **Reporting:**
-  - Generates detailed statistical reports from historical monitoring data.
-  - Calculates uptime, RTT stats (min, max, mean, median, p95), and colocation changes.
-  - Posts beautifully formatted reports to Misskey using MFM.
-  - Displays color-coded reports in the console.
-  - Can be triggered periodically or on-demand via CLI.
-
-## Installation
-
-1. Ensure Rust is installed. If not, install it using [rustup](https://rustup.rs/).
-2. Clone the repository:
-
-   ```sh
-   git clone <repository-url>
-   cd tracekey
-   ```
-
-3. Build the dependencies:
-
-   ```sh
-   cargo build --release
-   ```
+  - Generates statistical reports (uptime, RTT stats, `colo` transitions, etc.) from historical data.
+  - Outputs reports to the console and Misskey (using MFM).
+  - Can be run on-demand via CLI or periodically based on configuration.
 
 ## Usage
 
-### Monitoring Mode (Default)
+### Configuration
 
-This mode continuously monitors the specified URLs.
-
-1. Configure your `config/default.toml` file (see Configuration section for details).
-2. Build and run the application:
-
-   ```sh
-   cargo run --release
-   ```
-
-### Reporting Mode
-
-This mode generates a one-time report from the existing log file and then exits.
-
-```sh
-cargo run --release -- --report
-```
-
-#### CLI Options for Reporting
-
-- `--since <RFC3339>`: Sets the start time for the report period.
-- `--until <RFC3339>`: Sets the end time for the report period.
-- `--dry-run`: Prints the Misskey report content to the console instead of posting it.
-
-## Configuration
-
-All settings are managed in the `config/default.toml` file. Here are the main configuration options:
-
-**Note:** If `reporting.enabled` is `true`, `output_format` cannot be `"none"`.
-
-### Overriding with Environment Variables
-
-All configuration options can be overridden with environment variables. The prefix is `APP`, and nested keys are separated by `__` (double underscore).
-
-For example, to override `reporting.misskey_visibility`, set:
-
-
-### Example `config/default.toml`
+Edit `config/default.toml` to configure target URLs and Misskey integration settings.
 
 ```toml
-# Misskey integration (optional)
+# Misskey integration (disabled if token is empty)
 misskey_url = "https://misskey.io"
-# To disable Misskey integration, leave this token empty.
 misskey_token = ""
 
 # Target URLs to monitor
-target_urls = ["https://misskey.io", "https://misskey.vip"]
+target_urls = ["https://misskey.io", "https://example.com"]
 
-# Monitoring settings
+# Check interval in seconds
 check_interval_seconds = 300
-user_agent = "Tracekey/1.0"
-request_timeout_seconds = 10
-max_concurrent_checks = 10
-colo_change_notify_misskey = true
 
-# Output settings
-# Format can be "json" (JSON Lines) or "jsonl" or "none".
+# Output settings ("jsonl" or "none")
 output_format = "jsonl"
 output_path = "trace_log.jsonl"
 
 # Reporting settings
 [reporting]
 enabled = true
-interval = "24h" # Reporting interval for periodic execution
+interval = "24h" # Interval for periodic reports
 output_to_console = true
 output_to_misskey = true
-misskey_visibility = "home" # "public", "home", "followers"
-rtt_threshold_ms = 500 # RTT threshold for console highlighting
-p95_rtt_threshold_ms = 1000 # P95 RTT threshold for console highlighting
-uptime_threshold_percent = 99.5 # Uptime threshold for console highlighting
-critical_uptime_threshold_percent = 90.0 # Critical uptime threshold for console highlighting
+misskey_visibility = "home"
 ```
 
-### Configuration Details
+### Monitoring Mode
 
-#### Misskey Integration (Optional)
+Continuously runs checks based on the configuration file.
 
-- `misskey_url`: URL of the Misskey instance (e.g., "https://misskey.io")
-- `misskey_token`: Misskey API token (leave empty to disable)
+```sh
+cargo run --release
+```
 
-#### Targets
+### Reporting Mode
 
-- `target_urls`: List of URLs to monitor (e.g., ["https://misskey.io", "https://misskey.vip"])
+Generates a one-time report from the recorded data and exits.
 
-#### Monitoring Settings
+```sh
+cargo run --release -- --report
+```
 
-- `check_interval_seconds`: Check interval in seconds
-- `user_agent`: User-agent for requests
-- `request_timeout_seconds`: Request timeout in seconds
-- `max_concurrent_checks`: The maximum number of concurrent checks. For a small number of targets, the default `10` is fine. If you are monitoring a large number of URLs, consider lowering this value to avoid rate-limiting issues.
-- `colo_change_notify_misskey`: Enable instant notifications to Misskey on colocation changes.
+**Reporting Mode Options:**
 
-#### Output Settings
-
-- `output_format`: Output format ("jsonl", "none"). "json" is accepted as an alias of JSON Lines for backward compatibility.
-- `output_path`: Path to the output file.
-
-#### Reporting Settings
-
-- `reporting.enabled`: Enable reporting functionality
-- `reporting.interval`: Reporting interval (e.g., "24h")
-- `reporting.output_to_console`: Output to console
-- `reporting.output_to_misskey`: Post to Misskey
-- `reporting.misskey_visibility`: Post visibility ("public", "home", "followers")
-- `reporting.rtt_threshold_ms`: RTT threshold for console highlighting (mean RTT will be colored red if it exceeds this value).
-- `reporting.p95_rtt_threshold_ms`: RTT threshold for console highlighting (p95 RTT will be colored red if it exceeds this value).
-- `reporting.uptime_threshold_percent`: Uptime threshold for console highlighting (uptime will be colored yellow if it falls below this value).
-- `reporting.critical_uptime_threshold_percent`: Critical uptime threshold for console highlighting (uptime will be colored red if it falls below this value).
+- `--since <RFC3339>`: Sets the start time for the report period.
+- `--until <RFC3339>`: Sets the end time for the report period.
+- `--dry-run`: Prints the report content to the console instead of posting to Misskey.
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
-## Contributing
-
-Please report bugs or request features via GitHub Issues. Pull requests are welcome!
+[MIT License](LICENSE)
