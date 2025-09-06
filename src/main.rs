@@ -204,12 +204,17 @@ async fn run_checks_once(
 ) -> Result<()> {
     println!("Running check...");
 
-    let mut prev_states: HashMap<String, LastSuccessState> = load_last_success_states()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|state| (state.url.clone(), state))
-        .collect();
+    let mut prev_states: HashMap<String, LastSuccessState> = match load_last_success_states().await
+    {
+        Ok(states) => states,
+        Err(e) => {
+            eprintln!("Failed to load previous success states: {}", e);
+            Vec::new()
+        }
+    }
+    .into_iter()
+    .map(|state| (state.url.clone(), state))
+    .collect();
 
     let tasks = settings.target_urls.iter().cloned().map(|url| {
         let client = client.clone();
@@ -231,7 +236,7 @@ async fn run_checks_once(
                     "Result for {}: colo={}, rtt={}ms",
                     result.url,
                     result.colo.as_deref().unwrap_or("N/A"),
-                    result.rtt_millis.unwrap_or(0)
+                    result.rtt_millis.unwrap_or(0),
                 );
                 results.push(result);
             }
@@ -260,21 +265,28 @@ async fn run_checks_once(
                         let now = Utc::now();
                         if now - prev_state.last_notification_timestamp > ChronoDuration::minutes(5)
                         {
-                            let domain = result.url
-                                .parse::<url::Url>()
-                                .ok()
-                                .and_then(|u| u.host_str().map(|s| s.to_string()))
-                                .unwrap_or_else(|| result.url.clone());
-                            let (rtt_color, rtt_text, rtt_unit): (&str, String, &str) = match result.rtt_millis {
-                                Some(ms @ 0..=299) => ("3a3", ms.to_string(), "ms"),   // green
-                                Some(ms @ 300..=499) => ("991", ms.to_string(), "ms"), // yellow
-                                Some(ms @ 500..=999) => ("c52", ms.to_string(), "ms"), // orange
-                                Some(ms) => ("b22", ms.to_string(), "ms"),             // red
-                                None => ("999", "N/A".into(), ""),                     // gray for no data
+                            let domain = if let Ok(parsed_url) = result.url.parse::<url::Url>() {
+                                parsed_url.host_str().unwrap_or(&result.url).to_string()
+                            } else {
+                                result.url.clone()
                             };
+                            let (rtt_color, rtt_text, rtt_unit): (&str, String, &str) =
+                                match result.rtt_millis {
+                                    Some(ms @ 0..=299) => ("3a3", ms.to_string(), "ms"), // green
+                                    Some(ms @ 300..=499) => ("991", ms.to_string(), "ms"), // yellow
+                                    Some(ms @ 500..=999) => ("c52", ms.to_string(), "ms"), // orange
+                                    Some(ms) => ("b22", ms.to_string(), "ms"),           // red
+                                    None => ("999", "N/A".into(), ""), // gray for no data
+                                };
                             let message = format!(
-                            "<small>`{}`</small>→`{}` $[border.color=0000,radius=10 $[bg.color={} $[fg.color=fff  {}<small>{}</small> ]]] ?[{}]({})",
-                            prev_colo, curr_colo, rtt_color, rtt_text, rtt_unit, domain, result.url
+                                "<small>`{}`</small>→`{}` $[border.color=0000,radius=10 $[bg.color={} $[fg.color=fff  {}<small>{}</small> ]]] ?[{}]({})",
+                                prev_colo,
+                                curr_colo,
+                                rtt_color,
+                                rtt_text,
+                                rtt_unit,
+                                domain,
+                                result.url
                             );
                             colo_change_messages.push(message);
                             prev_state.last_notification_timestamp = now;
@@ -296,7 +308,16 @@ async fn run_checks_once(
                 let sem_clone = misskey_semaphore.clone();
 
                 tokio::spawn(async move {
-                    let _permit = sem_clone.acquire_owned().await.unwrap();
+                    let permit = match sem_clone.acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => {
+                            eprintln!(
+                                "Misskey notification semaphore closed, skipping notification."
+                            );
+                            return;
+                        }
+                    };
+                    let _permit = permit;
                     println!("Posting colo change to Misskey...");
                     match post_to_misskey(
                         &misskey_client,
@@ -922,7 +943,13 @@ async fn load_last_success_states() -> Result<Vec<LastSuccessState>> {
         };
 
         let reader = BufReader::new(file);
-        let states = serde_json::from_reader(reader).unwrap_or_default();
+        let states = match serde_json::from_reader(reader) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to parse last success states, starting fresh: {}", e);
+                Vec::new()
+            }
+        };
 
         Ok(states)
     })
