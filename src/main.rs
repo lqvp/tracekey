@@ -260,13 +260,20 @@ async fn run_checks_once(
                         let now = Utc::now();
                         if now - prev_state.last_notification_timestamp > ChronoDuration::minutes(5)
                         {
+                            let domain = result.url
+                                .parse::<url::Url>()
+                                .map(|u| u.host_str().unwrap_or(&result.url).to_string())
+                                .unwrap_or(result.url.clone());
+                            let rtt_color = match result.rtt_millis {
+                                Some(0..=299) => "3a3",   // green
+                                Some(300..=499) => "991", // yellow
+                                Some(500..=999) => "c52", // orange
+                                Some(_) => "b22",         // red
+                                None => "999",            // gray for no data
+                            };
                             let message = format!(
-                                "Cloudflare colocation for ?[{}]({}) changed: `{}` -> `{}` (RTT: {}ms)",
-                                result.url,
-                                result.url,
-                                prev_colo,
-                                curr_colo,
-                                result.rtt_millis.unwrap_or(0)
+                                "?[{}]({}) <small>`{}`</small>→`{}` $[border.color=0000,radius=10 $[bg.color={} $[fg.color=fff  {}<small>ms</small> ]]]",
+                                domain, result.url, prev_colo, curr_colo, rtt_color, result.rtt_millis.unwrap_or(0)
                             );
                             colo_change_messages.push(message);
                             prev_state.last_notification_timestamp = now;
