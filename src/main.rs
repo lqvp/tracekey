@@ -262,18 +262,19 @@ async fn run_checks_once(
                         {
                             let domain = result.url
                                 .parse::<url::Url>()
-                                .map(|u| u.host_str().unwrap_or(&result.url).to_string())
-                                .unwrap_or(result.url.clone());
-                            let rtt_color = match result.rtt_millis {
-                                Some(0..=299) => "3a3",   // green
-                                Some(300..=499) => "991", // yellow
-                                Some(500..=999) => "c52", // orange
-                                Some(_) => "b22",         // red
-                                None => "999",            // gray for no data
+                                .ok()
+                                .and_then(|u| u.host_str().map(|s| s.to_string()))
+                                .unwrap_or_else(|| result.url.clone());
+                            let (rtt_color, rtt_text, rtt_unit): (&str, String, &str) = match result.rtt_millis {
+                                Some(ms @ 0..=299) => ("3a3", ms.to_string(), "ms"),   // green
+                                Some(ms @ 300..=499) => ("991", ms.to_string(), "ms"), // yellow
+                                Some(ms @ 500..=999) => ("c52", ms.to_string(), "ms"), // orange
+                                Some(ms) => ("b22", ms.to_string(), "ms"),             // red
+                                None => ("999", "N/A".into(), ""),                     // gray for no data
                             };
                             let message = format!(
-                                "?[{}]({}) <small>`{}`</small>→`{}` $[border.color=0000,radius=10 $[bg.color={} $[fg.color=fff  {}<small>ms</small> ]]]",
-                                domain, result.url, prev_colo, curr_colo, rtt_color, result.rtt_millis.unwrap_or(0)
+                            "<small>`{}`</small>→`{}` $[border.color=0000,radius=10 $[bg.color={} $[fg.color=fff  {}<small>{}</small> ]]] ?[{}]({})",
+                            prev_colo, curr_colo, rtt_color, rtt_text, rtt_unit, domain, result.url
                             );
                             colo_change_messages.push(message);
                             prev_state.last_notification_timestamp = now;
