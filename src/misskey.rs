@@ -36,6 +36,21 @@ pub async fn post_to_misskey(
             Ok(resp) if resp.status().is_success() => return Ok(()),
             Ok(resp) => {
                 let status = resp.status();
+                if status.as_u16() == 429 {
+                    if let Some(secs) = resp
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
+                        delay = Duration::from_secs(secs);
+                    }
+                    eprintln!(
+                        "Attempt {} throttled: 429 Too Many Requests; backing off for {:?}",
+                        attempts, delay
+                    );
+                    continue;
+                }
                 let error_text = resp.text().await.unwrap_or_else(|_| "No body".to_string());
                 if status.is_client_error() {
                     return Err(anyhow::anyhow!(
