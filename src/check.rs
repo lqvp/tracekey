@@ -196,6 +196,7 @@ async fn get_cloudflare_trace(client: &Client, url: &str) -> Result<CheckResult>
     let start_time = time::Instant::now();
     let resp = client
         .get(&trace_url)
+        .timeout(std::time::Duration::from_secs(10))
         .send()
         .await?
         .error_for_status()?
