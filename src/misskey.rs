@@ -26,8 +26,12 @@ pub async fn post_to_misskey(
 
     loop {
         attempts += 1;
-        let response = client.post(&api_url).json(&params).send().await;
-
+        let response = client
+            .post(&api_url)
+            .json(&params)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await;
         match response {
             Ok(resp) if resp.status().is_success() => return Ok(()),
             Ok(resp) => {
