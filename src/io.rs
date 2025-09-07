@@ -11,8 +11,10 @@ pub async fn write_results(path: String, format: String, results: Vec<CheckResul
     }
 
     tokio::task::spawn_blocking(move || -> Result<()> {
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
-
         match format.as_str() {
             "json" | "jsonl" => {
                 let mut file = std::io::BufWriter::new(file);
