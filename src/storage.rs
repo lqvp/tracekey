@@ -27,6 +27,7 @@ pub(crate) async fn write_results(
                     file.write_all(b"\n")?;
                 }
                 file.flush()?;
+                file.get_ref().sync_all()?;
             }
             other => anyhow::bail!("unsupported output_format: {}", other),
         }

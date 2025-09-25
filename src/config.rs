@@ -1,3 +1,5 @@
+use std::{env, time::Duration};
+
 use anyhow::Result;
 use config::{Config, File};
 use serde::Deserialize;
@@ -5,7 +7,8 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub(crate) struct ReportingSettings {
     pub(crate) enabled: bool,
-    pub(crate) interval: String,
+    #[serde(with = "humantime_serde")]
+    pub(crate) interval: Duration,
     pub(crate) output_to_console: bool,
     pub(crate) output_to_misskey: bool,
     pub(crate) misskey_visibility: String,
@@ -32,8 +35,9 @@ pub(crate) struct Settings {
 }
 
 pub(crate) fn load_settings() -> Result<Settings> {
+    let config_path = env::var("CONFIG_PATH").unwrap_or_else(|_| "config/default.toml".to_string());
     let settings = Config::builder()
-        .add_source(File::with_name("config/default.toml").required(false))
+        .add_source(File::with_name(&config_path).required(false))
         .add_source(config::Environment::with_prefix("APP").separator("__"))
         .build()?;
     Ok(settings.try_deserialize()?)

@@ -90,9 +90,12 @@ pub(crate) async fn run_checks_once(
                             };
                             let (rtt_color, rtt_text, rtt_unit): (&str, String, &str) =
                                 match result.rtt_millis {
-                                    Some(ms @ 0..=299) => ("3a3", ms.to_string(), "ms"),
-                                    Some(ms @ 300..=499) => ("991", ms.to_string(), "ms"),
-                                    Some(ms @ 500..=999) => ("c52", ms.to_string(), "ms"),
+                                    Some(ms) if ms <= settings.reporting.rtt_threshold_ms => {
+                                        ("3a3", ms.to_string(), "ms")
+                                    }
+                                    Some(ms) if ms <= settings.reporting.p95_rtt_threshold_ms => {
+                                        ("991", ms.to_string(), "ms")
+                                    }
                                     Some(ms) => ("b22", ms.to_string(), "ms"),
                                     None => ("999", "N/A".into(), ""),
                                 };
@@ -210,6 +213,10 @@ async fn get_cloudflare_trace(client: &Client, url: &str) -> Result<CheckResult>
         .lines()
         .find_map(|line| line.strip_prefix(COLO_PREFIX))
         .map(|s| s.to_string());
+
+    if colo_opt.is_none() {
+        anyhow::bail!("Cloudflare trace に colo が含まれていません: {}", trace_url);
+    }
 
     Ok(CheckResult {
         timestamp: Utc::now(),

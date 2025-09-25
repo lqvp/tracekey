@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
-use humantime::parse_duration;
 use reqwest::Client;
 use tokio::sync::Semaphore;
 use tokio::time::{self, MissedTickBehavior};
@@ -76,11 +75,12 @@ async fn main() -> Result<()> {
     let mut check_interval = time::interval(check_interval_duration);
     check_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    let report_interval_duration = parse_duration(&settings.reporting.interval)?;
+    let report_interval_duration = settings.reporting.interval;
     if report_interval_duration.is_zero() {
         anyhow::bail!("Reporting interval cannot be 0");
     }
     let mut report_interval = time::interval(report_interval_duration);
+    report_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let _ = report_interval.tick().await;
 

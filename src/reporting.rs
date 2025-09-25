@@ -3,9 +3,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 use colored::*;
-use humantime::parse_duration;
 use reqwest::Client;
-use statistical::{mean, median};
+use statistical::mean;
 
 use crate::cli::Cli;
 use crate::config::{ReportingSettings, Settings};
@@ -18,10 +17,7 @@ pub(crate) async fn run_report_once(settings: &Settings, cli: &Cli, client: &Cli
     let since = if let Some(s) = cli.since {
         s
     } else {
-        let duration_std = parse_duration(&settings.reporting.interval)
-            .map_err(|e| anyhow::anyhow!("Failed to parse reporting interval setting: {}", e))?;
-
-        let duration_chrono = ChronoDuration::from_std(duration_std)
+        let duration_chrono = ChronoDuration::from_std(settings.reporting.interval)
             .map_err(|_| anyhow::anyhow!("Reporting interval setting is invalid or too large"))?;
 
         until - duration_chrono
@@ -160,7 +156,7 @@ fn generate_report(
                     .max()
                     .unwrap_or(0),
                 mean: mean(&rtts),
-                median: median(&rtts),
+                median: percentile(&sorted_rtts, 0.5),
                 p95,
             }
         } else {

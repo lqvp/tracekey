@@ -24,6 +24,7 @@ pub(crate) async fn post_to_misskey(
     let mut attempts = 0;
     let max_attempts = 5;
     let mut delay = Duration::from_secs(1);
+    let max_delay = Duration::from_secs(30);
 
     loop {
         attempts += 1;
@@ -62,6 +63,7 @@ pub(crate) async fn post_to_misskey(
         let jitter_ms: u64 = rng().random_range(0u64..1000u64);
         delay = delay
             .saturating_mul(2)
-            .saturating_add(Duration::from_millis(jitter_ms));
+            .saturating_add(Duration::from_millis(jitter_ms))
+            .min(max_delay);
     }
 }

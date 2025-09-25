@@ -3,6 +3,7 @@ use std::fs::{File as StdFile, OpenOptions};
 use std::io::{BufReader, Write};
 
 use anyhow::Result;
+use scopeguard::guard;
 use tokio::task;
 
 use crate::models::LastSuccessState;
@@ -34,6 +35,9 @@ pub(crate) async fn save_last_success_states(states: &[LastSuccessState]) -> Res
         let updated_states: Vec<LastSuccessState> = all_states.into_values().collect();
 
         let tmp_file = format!("{}/last_success.json.tmp", state_dir);
+        let cleanup = guard(tmp_file.clone(), |path| {
+            let _ = std::fs::remove_file(path);
+        });
         {
             let file = OpenOptions::new()
                 .create(true)
@@ -46,6 +50,7 @@ pub(crate) async fn save_last_success_states(states: &[LastSuccessState]) -> Res
             file.sync_all()?;
         }
         std::fs::rename(&tmp_file, &state_file)?;
+        scopeguard::ScopeGuard::into_inner(cleanup);
         if let Ok(dir) = StdFile::open(&state_dir) {
             let _ = dir.sync_all();
         }
